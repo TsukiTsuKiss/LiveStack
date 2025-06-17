@@ -116,9 +116,19 @@ python3 live_stack.py
    pip install piexif
    ```
 
+4.`opencv`  (画像処理用)
+   ```bash
+   pip install opencv-python
+   ```
+
+5.`picamera2`  (RasPiカメラ用、既に入っているかも)
+   ```bash
+   pip install picamera2
+   ```
+
 **仮想環境を使用する場合:**
 ```bash
-python3 -m venv venv
+python3 -m venv --system-site-packages venv
 source venv/bin/activate
-pip install astropy Pillow piexif
+pip install astropy Pillow piexif opencv-python picamera2
 ```
