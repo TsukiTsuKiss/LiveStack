@@ -253,6 +253,180 @@ class LiveStack:
         self.dark_frame = (dark_sum / len(self.dark_buffer)).astype(np.uint8)
         print(f"ダークフレームを更新しました。現在の平均化フレーム数: {len(self.dark_buffer)}")
 
+class SettingsMenu:
+    """設定メニュークラス"""
+    
+    def __init__(self):
+        self.settings = [
+            {
+                "name": "Gain", 
+                "value": 2.0, 
+                "min": 1.0, 
+                "max": 8.0, 
+                "step": 0.5
+            },
+            {
+                "name": "Exposure", 
+                "value": 16667,  # 1/60秒
+                "values": [
+                    # 長時間露出（天体撮影向け）
+                    10000000,  # 10秒
+                    5000000,   # 5秒
+                    2000000,   # 2秒
+                    1000000,   # 1秒
+                    500000,    # 1/2秒
+                    250000,    # 1/4秒
+                    125000,    # 1/8秒
+                    62500,     # 1/16秒
+                    33333,     # 1/30秒
+                    16667,     # 1/60秒
+                    8000,      # 1/125秒
+                    4000,      # 1/250秒
+                    2000,      # 1/500秒
+                    1000,      # 1/1000秒
+                    500        # 1/2000秒
+                ]
+            },
+            {
+                "name": "Max Frames", 
+                "value": 100, 
+                "min": 1, 
+                "max": 100, 
+                "step": 1
+            },
+            {
+                "name": "Stack Mode", 
+                "value": False
+            }
+        ]
+        self.selected_item = 0
+        self.menu_active = False
+    
+    def handle_key(self, key):
+        """キー入力処理"""
+        if not self.menu_active:
+            return False
+        
+        # デバッグ用：キー値を表示
+        print(f"設定メニューキー入力: {key}")
+        
+        # OpenCVのカーソルキー値（複数の値に対応）
+        if key in [82, 0, 65]:  # 上矢印（環境によって異なる）
+            self.selected_item = (self.selected_item - 1) % len(self.settings)
+            return True
+        elif key in [84, 1, 66]:  # 下矢印
+            self.selected_item = (self.selected_item + 1) % len(self.settings)
+            return True
+        elif key in [81, 2, 68]:  # 左矢印
+            self.change_value(-1)
+            return True
+        elif key in [83, 3, 67]:  # 右矢印
+            self.change_value(1)
+            return True
+        elif key == 13:  # Enter - 設定適用
+            self.menu_active = False
+            return True
+        elif key == 27:  # ESC - キャンセル
+            self.menu_active = False
+            return True
+        
+        return False
+    
+    def change_value(self, direction):
+        """設定値を変更"""
+        setting = self.settings[self.selected_item]
+        
+        if setting["name"] == "Gain":
+            new_value = setting["value"] + (direction * setting["step"])
+            setting["value"] = max(setting["min"], min(setting["max"], new_value))
+            
+        elif setting["name"] == "Exposure":
+            values = setting["values"]
+            try:
+                current_index = values.index(setting["value"])
+            except ValueError:
+                # 現在の値がリストにない場合、最も近い値を見つける
+                current_index = min(range(len(values)), key=lambda i: abs(values[i] - setting["value"]))
+            
+            new_index = max(0, min(len(values)-1, current_index + direction))
+            setting["value"] = values[new_index]
+            
+        elif setting["name"] == "Max Frames":
+            new_value = setting["value"] + (direction * setting["step"])
+            setting["value"] = max(setting["min"], min(setting["max"], new_value))
+            
+        elif setting["name"] == "Stack Mode":
+            setting["value"] = not setting["value"]
+    
+    def get_exposure_text(self, exposure_us):
+        """露出時間をわかりやすいテキストに変換"""
+        if exposure_us >= 1000000:  # 1秒以上
+            seconds = exposure_us / 1000000
+            if seconds == int(seconds):
+                return f"{int(seconds)}s"
+            else:
+                return f"{seconds:.1f}s"
+        else:  # 1秒未満
+            denominator = int(1000000 / exposure_us)
+            return f"1/{denominator}"
+    
+    def draw_menu(self, frame):
+        """設定メニューを描画"""
+        if not self.menu_active:
+            return frame
+        
+        # 半透明の背景
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (50, 50), (600, 320), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+        
+        # タイトル
+        cv2.putText(frame, "Settings Menu", (60, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(frame, "Up/Down: Select Item  Left/Right: Change Value", 
+                   (60, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        cv2.putText(frame, "Enter: Apply  ESC: Cancel", 
+                   (60, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        
+        # 設定項目を表示
+        for i, setting in enumerate(self.settings):
+            y_pos = 170 + i * 35
+            color = (0, 255, 0) if i == self.selected_item else (255, 255, 255)
+            
+            # 値のテキスト生成
+            if setting["name"] == "Exposure":
+                value_text = self.get_exposure_text(setting["value"])
+            elif setting["name"] == "Stack Mode":
+                value_text = "ON" if setting["value"] else "OFF"
+            elif setting["name"] == "Gain":
+                value_text = f"{setting['value']:.1f}"
+            else:
+                value_text = str(setting["value"])
+            
+            text = f"{setting['name']}: {value_text}"
+            cv2.putText(frame, text, (80, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            
+            # 選択中の項目にカーソル表示
+            if i == self.selected_item:
+                cv2.putText(frame, ">", (55, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        return frame
+    
+    def get_current_values(self):
+        """現在の設定値を辞書で返す"""
+        return {
+            "gain": self.settings[0]["value"],
+            "exposure": self.settings[1]["value"],
+            "max_frames": int(self.settings[2]["value"]),
+            "stack_mode": self.settings[3]["value"]
+        }
+    
+    def set_current_values(self, gain, exposure, max_frames, stack_mode):
+        """現在の設定値を更新"""
+        self.settings[0]["value"] = gain
+        self.settings[1]["value"] = exposure
+        self.settings[2]["value"] = max_frames
+        self.settings[3]["value"] = stack_mode
+
 def save_fits(image, filename, metadata):
     """FITS形式でRGB画像を保存"""
     # BGRからRGBに変換
@@ -278,15 +452,17 @@ def main():
     print("Live Stack - LiveStack機能付きカメラプレビュー")
     print("操作:")
     print("  [q] 終了")
+    print("  [m] 設定メニュー")  # 新機能
     print("  [s] 保存")
     print("  [t] LiveStack ON/OFF")
     print("  [r] スタックリセット")
-    print("  [h] 高解像度切り替え")
-    print("  [+] ゲイン上げ (最大8.0)")
-    print("  [-] ゲイン下げ (最小1.0)")
-    print("シャッター速度:")
-    print("  [1] 1秒   [2] 1/2秒   [3] 1/4秒   [4] 1/8秒   [5] 1/16秒")
-    print("  [6] 1/30秒 [7] 1/60秒  [8] 1/125秒 [9] 1/250秒 [0] 1/500秒")
+    print("  [d] ダークフレーム取得")
+    print("  [f] FITS保存  [j] JPEG保存  [p] PNG保存")
+    print("従来のキー操作:")
+    print("  [+/-] ゲイン調整  [0-9] シャッター速度")
+    
+    # 設定メニュー初期化
+    settings_menu = SettingsMenu()
     
     # カメラ初期化
     high_res_mode = False
@@ -300,6 +476,9 @@ def main():
     live_stack = LiveStack(max_frames=100)  # max_framesを100に変更
     stacking_enabled = False
     dark_frame_set = False  # ダークフレーム取得状態を管理
+    
+    # 設定メニューの初期値を設定
+    settings_menu.set_current_values(current_gain, current_exposure, 100, stacking_enabled)
 
     try:
         picam2.start()
@@ -335,16 +514,68 @@ def main():
                     cv2.putText(display_frame, "Dark Frame Set", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
             # カメラ設定情報を表示
-            camera_info = f"Gain:{current_gain} Exp:1/{int(1000000/current_exposure)}"
+            camera_info = f"Gain:{current_gain} Exp:{settings_menu.get_exposure_text(current_exposure)}"
             cv2.putText(display_frame, camera_info, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            
+            # 設定メニューが有効な場合は描画
+            if settings_menu.menu_active:
+                display_frame = settings_menu.draw_menu(display_frame)
             
             # プレビュー表示
             cv2.imshow("Live Stack", display_frame)
             
             # キー入力処理
             key = cv2.waitKey(1) & 0xFF
+            
+            # 設定メニューのキー処理（優先）
+            if settings_menu.handle_key(key):
+                # 設定が変更された場合の処理
+                values = settings_menu.get_current_values()
+                
+                # カメラ設定を適用
+                if values["gain"] != current_gain or values["exposure"] != current_exposure:
+                    current_gain = values["gain"]
+                    current_exposure = values["exposure"]
+                    CameraConfig.apply_camera_settings(picam2, current_exposure, current_gain)
+                    print(f"設定適用: Gain={current_gain}, Exposure={settings_menu.get_exposure_text(current_exposure)}")
+                    
+                    # ダークフレームとリングバッファをリセット
+                    try:
+                        frame_shape = frame.shape if frame is not None else (480, 640, 3)
+                        live_stack.dark_frame = np.zeros(frame_shape, dtype=np.uint8)
+                        live_stack.dark_buffer = []
+                        dark_frame_set = False
+                        print("ダークフレームとリングバッファをリセットしました。")
+                    except Exception as e:
+                        print(f"リセット中にエラーが発生しました: {e}")
+                
+                # Max Frames設定を適用
+                if values["max_frames"] != live_stack.max_frames:
+                    live_stack.max_frames = values["max_frames"]
+                    print(f"Max Frames設定: {live_stack.max_frames}")
+                
+                # Stack Mode設定を適用
+                if values["stack_mode"] != stacking_enabled:
+                    stacking_enabled = values["stack_mode"]
+                    if stacking_enabled:
+                        print("LiveStack 有効")
+                        live_stack.reset()
+                    else:
+                        print("LiveStack 無効")
+                
+                continue
+            
+            # 既存のキー処理
             if key == ord("q"):
                 break
+            elif key == ord("m"):  # 設定メニュー表示
+                settings_menu.menu_active = not settings_menu.menu_active
+                if settings_menu.menu_active:
+                    # 現在の設定値をメニューに反映
+                    settings_menu.set_current_values(current_gain, current_exposure, live_stack.max_frames, stacking_enabled)
+                    print("設定メニューを開きました")
+                else:
+                    print("設定メニューを閉じました")
             elif key == ord("d"):
                 if not stacking_enabled:
                     live_stack.set_dark_frame(frame)
@@ -357,6 +588,7 @@ def main():
                 print(f"画像保存: {filename}")
             elif key == ord("t"):
                 stacking_enabled = not stacking_enabled
+                settings_menu.settings[3]["value"] = stacking_enabled  # メニューも同期
                 if stacking_enabled:
                     print("LiveStack 有効")
                     live_stack.reset()
@@ -381,8 +613,9 @@ def main():
                     ord("0"): 2000
                 }
                 current_exposure = exposure_times[key]
+                settings_menu.settings[1]["value"] = current_exposure  # メニューも同期
                 CameraConfig.apply_camera_settings(picam2, current_exposure, current_gain)
-                print(f"露出: 1/{int(1000000/current_exposure)}秒")
+                print(f"露出: {settings_menu.get_exposure_text(current_exposure)}")
 
                 # ダークフレームとリングバッファをリセット
                 try:
@@ -400,6 +633,7 @@ def main():
                     current_gain = min(8.0, current_gain + 0.5)
                 elif key == ord("-"):
                     current_gain = max(1.0, current_gain - 0.5)
+                settings_menu.settings[0]["value"] = current_gain  # メニューも同期
                 CameraConfig.apply_camera_settings(picam2, current_exposure, current_gain)
                 print(f"ゲイン: {current_gain}")
 
@@ -447,7 +681,7 @@ def main():
                 pil_image = Image.fromarray(cv2.cvtColor(raw_frame, cv2.COLOR_BGR2RGB))
                 pil_image.save(filename, "png")
                 print(f"PNGファイル保存: {filename}")
-                print(f"保存データ: Gain={current_gain}, Exposure=1/{int(1000000/current_exposure)}, Stack Count={live_stack.stack_count}")
+                print(f"保存データ: Gain={current_gain}, Exposure={settings_menu.get_exposure_text(current_exposure)}, Stack Count={live_stack.stack_count}")
 
     except KeyboardInterrupt:
         print("\n終了中...")
