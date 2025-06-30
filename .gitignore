@@ -1,0 +1,14 @@
+# 画像ファイル
+*.jpg
+*.jpeg
+*.png
+*.fits
+
+# キャッシュファイル
+__pycache__/
+*.pyc
+*.pyo
+
+# 一時ファイル
+*.tmp
+*.bak

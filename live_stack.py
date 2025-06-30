@@ -297,6 +297,10 @@ class SettingsMenu:
             {
                 "name": "Stack Mode", 
                 "value": False
+            },
+            {
+                "name": "Info Display", 
+                "value": True
             }
         ]
         self.selected_item = 0
@@ -357,6 +361,9 @@ class SettingsMenu:
             
         elif setting["name"] == "Stack Mode":
             setting["value"] = not setting["value"]
+        
+        elif setting["name"] == "Info Display":
+            setting["value"] = not setting["value"]
     
     def get_exposure_text(self, exposure_us):
         """露出時間をわかりやすいテキストに変換"""
@@ -397,6 +404,8 @@ class SettingsMenu:
                 value_text = self.get_exposure_text(setting["value"])
             elif setting["name"] == "Stack Mode":
                 value_text = "ON" if setting["value"] else "OFF"
+            elif setting["name"] == "Info Display":
+                value_text = "ON" if setting["value"] else "OFF"
             elif setting["name"] == "Gain":
                 value_text = f"{setting['value']:.1f}"
             else:
@@ -417,15 +426,17 @@ class SettingsMenu:
             "gain": self.settings[0]["value"],
             "exposure": self.settings[1]["value"],
             "max_frames": int(self.settings[2]["value"]),
-            "stack_mode": self.settings[3]["value"]
+            "stack_mode": self.settings[3]["value"],
+            "info_display": self.settings[4]["value"]
         }
     
-    def set_current_values(self, gain, exposure, max_frames, stack_mode):
+    def set_current_values(self, gain, exposure, max_frames, stack_mode, info_display=True):
         """現在の設定値を更新"""
         self.settings[0]["value"] = gain
         self.settings[1]["value"] = exposure
         self.settings[2]["value"] = max_frames
         self.settings[3]["value"] = stack_mode
+        self.settings[4]["value"] = info_display
 
 def save_fits(image, filename, metadata):
     """FITS形式でRGB画像を保存"""
@@ -453,6 +464,7 @@ def main():
     print("操作:")
     print("  [q] 終了")
     print("  [m] 設定メニュー")  # 新機能
+    print("  [i] 情報表示ON/OFF")  # 新機能
     print("  [s] 保存")
     print("  [t] LiveStack ON/OFF")
     print("  [r] スタックリセット")
@@ -476,9 +488,10 @@ def main():
     live_stack = LiveStack(max_frames=100)  # max_framesを100に変更
     stacking_enabled = False
     dark_frame_set = False  # ダークフレーム取得状態を管理
+    info_display = True  # 情報表示フラグ
     
     # 設定メニューの初期値を設定
-    settings_menu.set_current_values(current_gain, current_exposure, 100, stacking_enabled)
+    settings_menu.set_current_values(current_gain, current_exposure, 100, stacking_enabled, info_display)
 
     try:
         picam2.start()
@@ -496,26 +509,33 @@ def main():
                 display_frame = live_stack.process_stack()
                 if display_frame is None:
                     display_frame = frame
-                cv2.putText(display_frame, "Live Stack Mode", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
                 
-                # 加算しているフレーム数を表示
-                stack_info = f"Frames: {live_stack.stack_count}"
-                cv2.putText(display_frame, stack_info, (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                # 情報表示がONの場合のみテキストを表示
+                if info_display:
+                    cv2.putText(display_frame, "Live Stack Mode", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                    
+                    # 加算しているフレーム数を表示
+                    stack_info = f"Frames: {live_stack.stack_count}"
+                    cv2.putText(display_frame, stack_info, (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-                # ダークフレーム取得状態を表示
-                if dark_frame_set:
-                    cv2.putText(display_frame, "Dark Frame Set", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                    # ダークフレーム取得状態を表示
+                    if dark_frame_set:
+                        cv2.putText(display_frame, "Dark Frame Set", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             else:
                 display_frame = cv2.convertScaleAbs(frame, alpha=1.5, beta=20)
-                cv2.putText(display_frame, "Live View Mode", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                
+                # 情報表示がONの場合のみテキストを表示
+                if info_display:
+                    cv2.putText(display_frame, "Live View Mode", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
 
-                # ダークフレーム取得状態を表示
-                if dark_frame_set:
-                    cv2.putText(display_frame, "Dark Frame Set", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                    # ダークフレーム取得状態を表示
+                    if dark_frame_set:
+                        cv2.putText(display_frame, "Dark Frame Set", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-            # カメラ設定情報を表示
-            camera_info = f"Gain:{current_gain} Exp:{settings_menu.get_exposure_text(current_exposure)}"
-            cv2.putText(display_frame, camera_info, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            # カメラ設定情報を表示（情報表示がONの場合のみ）
+            if info_display:
+                camera_info = f"Gain:{current_gain} Exp:{settings_menu.get_exposure_text(current_exposure)}"
+                cv2.putText(display_frame, camera_info, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
             
             # 設定メニューが有効な場合は描画
             if settings_menu.menu_active:
@@ -563,6 +583,11 @@ def main():
                     else:
                         print("LiveStack 無効")
                 
+                # Info Display設定を適用
+                if values["info_display"] != info_display:
+                    info_display = values["info_display"]
+                    print(f"情報表示: {'ON' if info_display else 'OFF'}")
+                
                 continue
             
             # 既存のキー処理
@@ -572,10 +597,14 @@ def main():
                 settings_menu.menu_active = not settings_menu.menu_active
                 if settings_menu.menu_active:
                     # 現在の設定値をメニューに反映
-                    settings_menu.set_current_values(current_gain, current_exposure, live_stack.max_frames, stacking_enabled)
+                    settings_menu.set_current_values(current_gain, current_exposure, live_stack.max_frames, stacking_enabled, info_display)
                     print("設定メニューを開きました")
                 else:
                     print("設定メニューを閉じました")
+            elif key == ord("i"):  # 情報表示ON/OFF
+                info_display = not info_display
+                settings_menu.settings[4]["value"] = info_display  # メニューも同期
+                print(f"情報表示: {'ON' if info_display else 'OFF'}")
             elif key == ord("d"):
                 if not stacking_enabled:
                     live_stack.set_dark_frame(frame)
@@ -647,16 +676,25 @@ def main():
                 except Exception as e:
                     print(f"リセット中にエラーが発生しました: {e}")
             elif key == ord("f"):
-                # FITS保存
+                # FITS保存（文字情報なしの元フレームデータを保存）
+                if stacking_enabled and live_stack.stacked_image is not None:
+                    # LiveStackモードの場合はスタック処理済み画像（文字なし）
+                    raw_save_frame = np.clip(live_stack.stacked_image, 0, 255).astype(np.uint8)
+                else:
+                    # LiveViewモードの場合は元フレーム
+                    raw_save_frame = frame.copy()
+                
                 metadata = {
                     "EXPOSURE": current_exposure,  # 露光時間
-                    "EXPTIME": "microseconds",  # 露光時間の単位（短縮）
+                    "EXPTIME": "microseconds",  # 露光時間の単位
                     "GAIN": current_gain,
                     "STACKCNT": live_stack.stack_count,
+                    "MODE": "LiveStack" if stacking_enabled else "LiveView",
+                    "DARKFRM": "YES" if dark_frame_set else "NO",
                     "DATE": time.strftime("%Y-%m-%d %H:%M:%S")
                 }
                 filename = f"live_stack_{int(time.time())}.fits"
-                save_fits(display_frame, filename, metadata)
+                save_fits(raw_save_frame, filename, metadata)
 
             elif key == ord("j"):
                 # JPEG保存
