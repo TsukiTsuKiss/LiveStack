@@ -259,6 +259,11 @@ class SettingsMenu:
     def __init__(self):
         self.settings = [
             {
+                "name": "Camera", 
+                "value": 0,  # カメラ番号
+                "values": [0, 1]  # 利用可能なカメラ番号
+            },
+            {
                 "name": "Gain", 
                 "value": 2.0, 
                 "min": 1.0, 
@@ -340,7 +345,17 @@ class SettingsMenu:
         """設定値を変更"""
         setting = self.settings[self.selected_item]
         
-        if setting["name"] == "Gain":
+        if setting["name"] == "Camera":
+            values = setting["values"]
+            try:
+                current_index = values.index(setting["value"])
+            except ValueError:
+                current_index = 0
+            
+            new_index = (current_index + direction) % len(values)
+            setting["value"] = values[new_index]
+            
+        elif setting["name"] == "Gain":
             new_value = setting["value"] + (direction * setting["step"])
             setting["value"] = max(setting["min"], min(setting["max"], new_value))
             
@@ -382,9 +397,10 @@ class SettingsMenu:
         if not self.menu_active:
             return frame
         
-        # 半透明の背景
+        # 半透明の背景（設定項目数に応じて高さを調整）
+        menu_height = 170 + len(self.settings) * 35 + 20  # タイトル部分 + 項目数 * 行高さ + 余白
         overlay = frame.copy()
-        cv2.rectangle(overlay, (50, 50), (600, 320), (0, 0, 0), -1)
+        cv2.rectangle(overlay, (50, 50), (600, menu_height), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
         
         # タイトル
@@ -400,7 +416,9 @@ class SettingsMenu:
             color = (0, 255, 0) if i == self.selected_item else (255, 255, 255)
             
             # 値のテキスト生成
-            if setting["name"] == "Exposure":
+            if setting["name"] == "Camera":
+                value_text = f"{setting['value']}"
+            elif setting["name"] == "Exposure":
                 value_text = self.get_exposure_text(setting["value"])
             elif setting["name"] == "Stack Mode":
                 value_text = "ON" if setting["value"] else "OFF"
@@ -423,20 +441,22 @@ class SettingsMenu:
     def get_current_values(self):
         """現在の設定値を辞書で返す"""
         return {
-            "gain": self.settings[0]["value"],
-            "exposure": self.settings[1]["value"],
-            "max_frames": int(self.settings[2]["value"]),
-            "stack_mode": self.settings[3]["value"],
-            "info_display": self.settings[4]["value"]
+            "camera": self.settings[0]["value"],
+            "gain": self.settings[1]["value"],
+            "exposure": self.settings[2]["value"],
+            "max_frames": int(self.settings[3]["value"]),
+            "stack_mode": self.settings[4]["value"],
+            "info_display": self.settings[5]["value"]
         }
     
-    def set_current_values(self, gain, exposure, max_frames, stack_mode, info_display=True):
+    def set_current_values(self, camera, gain, exposure, max_frames, stack_mode, info_display=True):
         """現在の設定値を更新"""
-        self.settings[0]["value"] = gain
-        self.settings[1]["value"] = exposure
-        self.settings[2]["value"] = max_frames
-        self.settings[3]["value"] = stack_mode
-        self.settings[4]["value"] = info_display
+        self.settings[0]["value"] = camera
+        self.settings[1]["value"] = gain
+        self.settings[2]["value"] = exposure
+        self.settings[3]["value"] = max_frames
+        self.settings[4]["value"] = stack_mode
+        self.settings[5]["value"] = info_display
 
 def save_fits(image, filename, metadata):
     """FITS形式でRGB画像を保存"""
@@ -459,12 +479,28 @@ def save_fits(image, filename, metadata):
     hdu.writeto(filename, overwrite=True)
     print(f"FITSファイル保存: {filename}")
 
+def create_camera_safely(camera_num, current_gain, current_exposure, low_light_mode=False):
+    """カメラを安全に作成する（エラーハンドリング付き）"""
+    try:
+        if low_light_mode:
+            picam2 = CameraConfig.create_low_light_camera(camera_num)
+        else:
+            picam2 = CameraConfig.create_fast_camera(camera_num)
+        
+        # 現在の設定を適用
+        CameraConfig.apply_camera_settings(picam2, current_exposure, current_gain)
+        return picam2
+    except Exception as e:
+        print(f"カメラ {camera_num} の作成に失敗: {e}")
+        return None
+
 def main():
-    print("Live Stack - LiveStack機能付きカメラプレビュー")
+    print("Live Stack - LiveStack機能付きカメラプレビュー（カメラ切り替え機能付き）")
     print("操作:")
     print("  [q] 終了")
     print("  [m] 設定メニュー")  # 新機能
     print("  [i] 情報表示ON/OFF")  # 新機能
+    print("  [c] カメラ切り替え")  # 新機能
     print("  [s] 保存")
     print("  [t] LiveStack ON/OFF")
     print("  [r] スタックリセット")
@@ -477,12 +513,19 @@ def main():
     settings_menu = SettingsMenu()
     
     # カメラ初期化
+    current_camera = 0
     high_res_mode = False
     low_light_mode = False
     current_gain = 2.0
     current_exposure = 16667  # 1/60秒
     
-    picam2 = CameraConfig.create_fast_camera()
+    picam2 = create_camera_safely(current_camera, current_gain, current_exposure, low_light_mode)
+    
+    if picam2 is None:
+        print("カメラの初期化に失敗しました。")
+        return
+    
+    print(f"カメラ {current_camera} を使用中")
     
     # LiveStack初期化
     live_stack = LiveStack(max_frames=100)  # max_framesを100に変更
@@ -491,7 +534,7 @@ def main():
     info_display = True  # 情報表示フラグ
     
     # 設定メニューの初期値を設定
-    settings_menu.set_current_values(current_gain, current_exposure, 100, stacking_enabled, info_display)
+    settings_menu.set_current_values(current_camera, current_gain, current_exposure, 100, stacking_enabled, info_display)
 
     try:
         picam2.start()
@@ -534,7 +577,7 @@ def main():
 
             # カメラ設定情報を表示（情報表示がONの場合のみ）
             if info_display:
-                camera_info = f"Gain:{current_gain} Exp:{settings_menu.get_exposure_text(current_exposure)}"
+                camera_info = f"Cam{current_camera} Gain:{current_gain} Exp:{settings_menu.get_exposure_text(current_exposure)}"
                 cv2.putText(display_frame, camera_info, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
             
             # 設定メニューが有効な場合は描画
@@ -551,6 +594,49 @@ def main():
             if settings_menu.handle_key(key):
                 # 設定が変更された場合の処理
                 values = settings_menu.get_current_values()
+                
+                # カメラ切り替えの処理
+                if values["camera"] != current_camera:
+                    new_camera = values["camera"]
+                    print(f"設定メニューからカメラ {new_camera} に切り替え中...")
+                    
+                    # 現在のカメラを停止
+                    picam2.stop()
+                    picam2.close()
+                    
+                    # 新しいカメラを作成
+                    new_picam2 = create_camera_safely(new_camera, current_gain, current_exposure, low_light_mode)
+                    
+                    if new_picam2 is not None:
+                        # 切り替え成功
+                        picam2 = new_picam2
+                        current_camera = new_camera
+                        picam2.start()
+                        time.sleep(1)
+                        print(f"カメラ {current_camera} に切り替えました")
+                        
+                        # カメラ切り替え時にバッファとスタックをリセット
+                        live_stack.reset()
+                        live_stack.dark_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                        live_stack.dark_buffer = []
+                        dark_frame_set = False
+                        print("設定メニューでのカメラ切り替えに伴いバッファとスタックをリセットしました")
+                        
+                        # メニューの表示を更新
+                        settings_menu.settings[0]["value"] = current_camera
+                    else:
+                        # 切り替え失敗、元のカメラに戻す
+                        print(f"カメラ {new_camera} への切り替えに失敗。元のカメラに戻します。")
+                        picam2 = create_camera_safely(current_camera, current_gain, current_exposure, low_light_mode)
+                        if picam2 is not None:
+                            picam2.start()
+                            time.sleep(1)
+                            print(f"カメラ {current_camera} に復帰しました")
+                            # メニューの値も元に戻す
+                            settings_menu.settings[0]["value"] = current_camera
+                        else:
+                            print("カメラの復帰に失敗しました。")
+                            break
                 
                 # カメラ設定を適用
                 if values["gain"] != current_gain or values["exposure"] != current_exposure:
@@ -597,14 +683,55 @@ def main():
                 settings_menu.menu_active = not settings_menu.menu_active
                 if settings_menu.menu_active:
                     # 現在の設定値をメニューに反映
-                    settings_menu.set_current_values(current_gain, current_exposure, live_stack.max_frames, stacking_enabled, info_display)
+                    settings_menu.set_current_values(current_camera, current_gain, current_exposure, live_stack.max_frames, stacking_enabled, info_display)
                     print("設定メニューを開きました")
                 else:
                     print("設定メニューを閉じました")
             elif key == ord("i"):  # 情報表示ON/OFF
                 info_display = not info_display
-                settings_menu.settings[4]["value"] = info_display  # メニューも同期
+                settings_menu.settings[5]["value"] = info_display  # メニューも同期
                 print(f"情報表示: {'ON' if info_display else 'OFF'}")
+            elif key == ord("c"):  # カメラ切り替え
+                print("カメラを切り替え中...")
+                
+                # 現在のカメラを停止
+                picam2.stop()
+                picam2.close()
+                
+                # 次のカメラ番号を決定（0と1の間で切り替え）
+                next_camera = 1 - current_camera
+                
+                # 新しいカメラを作成
+                new_picam2 = create_camera_safely(next_camera, current_gain, current_exposure, low_light_mode)
+                
+                if new_picam2 is not None:
+                    # 切り替え成功
+                    picam2 = new_picam2
+                    current_camera = next_camera
+                    picam2.start()
+                    time.sleep(1)
+                    print(f"カメラ {current_camera} に切り替えました")
+                    
+                    # カメラ切り替え時にバッファとスタックをリセット
+                    live_stack.reset()
+                    live_stack.dark_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                    live_stack.dark_buffer = []
+                    dark_frame_set = False
+                    print("カメラ切り替えに伴いバッファとスタックをリセットしました")
+                    
+                    # メニューの表示も同期
+                    settings_menu.settings[0]["value"] = current_camera
+                else:
+                    # 切り替え失敗、元のカメラに戻す
+                    print(f"カメラ {next_camera} への切り替えに失敗。元のカメラに戻します。")
+                    picam2 = create_camera_safely(current_camera, current_gain, current_exposure, low_light_mode)
+                    if picam2 is not None:
+                        picam2.start()
+                        time.sleep(1)
+                        print(f"カメラ {current_camera} に復帰しました")
+                    else:
+                        print("カメラの復帰に失敗しました。")
+                        break
             elif key == ord("d"):
                 if not stacking_enabled:
                     live_stack.set_dark_frame(frame)
@@ -612,12 +739,12 @@ def main():
                 else:
                     print("ダークフレームはLiveViewモードでのみ取得可能です。")
             elif key == ord("s"):
-                filename = f"live_stack_{int(time.time())}.jpg"
+                filename = f"live_stack_cam{current_camera}_{int(time.time())}.jpg"
                 cv2.imwrite(filename, display_frame)
                 print(f"画像保存: {filename}")
             elif key == ord("t"):
                 stacking_enabled = not stacking_enabled
-                settings_menu.settings[3]["value"] = stacking_enabled  # メニューも同期
+                settings_menu.settings[4]["value"] = stacking_enabled  # メニューも同期
                 if stacking_enabled:
                     print("LiveStack 有効")
                     live_stack.reset()
@@ -642,7 +769,7 @@ def main():
                     ord("0"): 2000
                 }
                 current_exposure = exposure_times[key]
-                settings_menu.settings[1]["value"] = current_exposure  # メニューも同期
+                settings_menu.settings[2]["value"] = current_exposure  # メニューも同期
                 CameraConfig.apply_camera_settings(picam2, current_exposure, current_gain)
                 print(f"露出: {settings_menu.get_exposure_text(current_exposure)}")
 
@@ -662,7 +789,7 @@ def main():
                     current_gain = min(8.0, current_gain + 0.5)
                 elif key == ord("-"):
                     current_gain = max(1.0, current_gain - 0.5)
-                settings_menu.settings[0]["value"] = current_gain  # メニューも同期
+                settings_menu.settings[1]["value"] = current_gain  # メニューも同期
                 CameraConfig.apply_camera_settings(picam2, current_exposure, current_gain)
                 print(f"ゲイン: {current_gain}")
 
@@ -693,12 +820,12 @@ def main():
                     "DARKFRM": "YES" if dark_frame_set else "NO",
                     "DATE": time.strftime("%Y-%m-%d %H:%M:%S")
                 }
-                filename = f"live_stack_{int(time.time())}.fits"
+                filename = f"live_stack_cam{current_camera}_{int(time.time())}.fits"
                 save_fits(raw_save_frame, filename, metadata)
 
             elif key == ord("j"):
                 # JPEG保存
-                filename = f"live_stack_{int(time.time())}.jpg"
+                filename = f"live_stack_cam{current_camera}_{int(time.time())}.jpg"
                 raw_frame = frame.copy()  # 文字を書き込む前のフレームをコピー
                 pil_image = Image.fromarray(cv2.cvtColor(raw_frame, cv2.COLOR_BGR2RGB))
                 exif_dict = {
@@ -714,7 +841,7 @@ def main():
 
             elif key == ord("p"):
                 # PNG保存
-                filename = f"live_stack_{int(time.time())}.png"
+                filename = f"live_stack_cam{current_camera}_{int(time.time())}.png"
                 raw_frame = frame.copy()  # 文字を書き込む前のフレームをコピー
                 pil_image = Image.fromarray(cv2.cvtColor(raw_frame, cv2.COLOR_BGR2RGB))
                 pil_image.save(filename, "png")
@@ -726,7 +853,9 @@ def main():
     except Exception as e:
         print(f"エラー: {e}")
     finally:
-        picam2.stop()
+        if picam2 is not None:
+            picam2.stop()
+            picam2.close()
         cv2.destroyAllWindows()
         print("Live Stack終了")
 

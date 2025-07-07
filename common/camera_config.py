@@ -10,9 +10,9 @@ class CameraConfig:
     """カメラ設定の共通クラス"""
     
     @staticmethod
-    def create_camera(resolution=(1640, 1232), buffer_count=1):
+    def create_camera(camera_num=0, resolution=(1640, 1232), buffer_count=1):
         """カメラインスタンスを作成して設定"""
-        picam2 = Picamera2()
+        picam2 = Picamera2(camera_num)
         
         # プレビュー設定
         preview_config = picam2.create_preview_configuration(
@@ -32,19 +32,19 @@ class CameraConfig:
         return picam2
     
     @staticmethod
-    def create_high_res_camera():
+    def create_high_res_camera(camera_num=0):
         """高解像度カメラ設定"""
-        return CameraConfig.create_camera(resolution=(2028, 1520))
+        return CameraConfig.create_camera(camera_num=camera_num, resolution=(2028, 1520))
     
     @staticmethod
-    def create_fast_camera():
+    def create_fast_camera(camera_num=0):
         """高速プレビュー用カメラ設定"""
-        return CameraConfig.create_camera(resolution=(1280, 960), buffer_count=1)
+        return CameraConfig.create_camera(camera_num=camera_num, resolution=(1280, 960), buffer_count=1)
     
     @staticmethod
-    def create_low_light_camera():
+    def create_low_light_camera(camera_num=0):
         """暗環境LiveStack用カメラ設定"""
-        picam2 = Picamera2()
+        picam2 = Picamera2(camera_num)
         
         # プレビュー設定
         preview_config = picam2.create_preview_configuration(
