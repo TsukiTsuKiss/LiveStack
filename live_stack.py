@@ -549,9 +549,15 @@ def main():
 
             # LiveStack処理
             if stacking_enabled:
-                display_frame = live_stack.process_stack()
-                if display_frame is None:
-                    display_frame = frame
+                stacked_result = live_stack.process_stack()
+                if stacked_result is None:
+                    stacked_result = frame
+                
+                # 保存用フレーム（テキスト情報なし）
+                save_frame = stacked_result.copy()
+                
+                # 表示用フレーム（テキスト情報あり）
+                display_frame = stacked_result.copy()
                 
                 # 情報表示がONの場合のみテキストを表示
                 if info_display:
@@ -565,7 +571,11 @@ def main():
                     if dark_frame_set:
                         cv2.putText(display_frame, "Dark Frame Set", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             else:
-                display_frame = cv2.convertScaleAbs(frame, alpha=1.5, beta=20)
+                # 保存用フレーム（テキスト情報なし）
+                save_frame = cv2.convertScaleAbs(frame, alpha=1.5, beta=20)
+                
+                # 表示用フレーム
+                display_frame = save_frame.copy()
                 
                 # 情報表示がONの場合のみテキストを表示
                 if info_display:
@@ -740,7 +750,7 @@ def main():
                     print("ダークフレームはLiveViewモードでのみ取得可能です。")
             elif key == ord("s"):
                 filename = f"live_stack_cam{current_camera}_{int(time.time())}.jpg"
-                cv2.imwrite(filename, display_frame)
+                cv2.imwrite(filename, save_frame)
                 print(f"画像保存: {filename}")
             elif key == ord("t"):
                 stacking_enabled = not stacking_enabled
@@ -803,14 +813,7 @@ def main():
                 except Exception as e:
                     print(f"リセット中にエラーが発生しました: {e}")
             elif key == ord("f"):
-                # FITS保存（文字情報なしの元フレームデータを保存）
-                if stacking_enabled and live_stack.stacked_image is not None:
-                    # LiveStackモードの場合はスタック処理済み画像（文字なし）
-                    raw_save_frame = np.clip(live_stack.stacked_image, 0, 255).astype(np.uint8)
-                else:
-                    # LiveViewモードの場合は元フレーム
-                    raw_save_frame = frame.copy()
-                
+                # FITS保存（文字情報なしのスタック済みフレームを保存）
                 metadata = {
                     "EXPOSURE": current_exposure,  # 露光時間
                     "EXPTIME": "microseconds",  # 露光時間の単位
@@ -821,13 +824,12 @@ def main():
                     "DATE": time.strftime("%Y-%m-%d %H:%M:%S")
                 }
                 filename = f"live_stack_cam{current_camera}_{int(time.time())}.fits"
-                save_fits(raw_save_frame, filename, metadata)
+                save_fits(save_frame, filename, metadata)
 
             elif key == ord("j"):
                 # JPEG保存
                 filename = f"live_stack_cam{current_camera}_{int(time.time())}.jpg"
-                raw_frame = frame.copy()  # 文字を書き込む前のフレームをコピー
-                pil_image = Image.fromarray(cv2.cvtColor(raw_frame, cv2.COLOR_BGR2RGB))
+                pil_image = Image.fromarray(cv2.cvtColor(save_frame, cv2.COLOR_BGR2RGB))
                 exif_dict = {
                     "0th": {
                         piexif.ImageIFD.DateTime: time.strftime("%Y:%m:%d %H:%M:%S"),
@@ -842,8 +844,7 @@ def main():
             elif key == ord("p"):
                 # PNG保存
                 filename = f"live_stack_cam{current_camera}_{int(time.time())}.png"
-                raw_frame = frame.copy()  # 文字を書き込む前のフレームをコピー
-                pil_image = Image.fromarray(cv2.cvtColor(raw_frame, cv2.COLOR_BGR2RGB))
+                pil_image = Image.fromarray(cv2.cvtColor(save_frame, cv2.COLOR_BGR2RGB))
                 pil_image.save(filename, "png")
                 print(f"PNGファイル保存: {filename}")
                 print(f"保存データ: Gain={current_gain}, Exposure={settings_menu.get_exposure_text(current_exposure)}, Stack Count={live_stack.stack_count}")
