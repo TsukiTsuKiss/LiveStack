@@ -26,7 +26,7 @@ class LiveStack:
         self.reset()
         self.buffer = [None] * max_frames  # Noneで初期化
         self.buffer_index = 0
-        self.dark_frame = np.zeros((480, 640, 3), dtype=np.uint8)  # 真っ黒なフレームで初期化
+        self.dark_frame = None  # d キーで取得するまでは None（サイズを動的に合わせるため）
         self.dark_buffer = []  # ダークフレーム用リングバッファ
 
     def reset(self):
@@ -627,7 +627,7 @@ def main():
                         
                         # カメラ切り替え時にバッファとスタックをリセット
                         live_stack.reset()
-                        live_stack.dark_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                        live_stack.dark_frame = None
                         live_stack.dark_buffer = []
                         dark_frame_set = False
                         print("設定メニューでのカメラ切り替えに伴いバッファとスタックをリセットしました")
@@ -657,8 +657,7 @@ def main():
                     
                     # ダークフレームとリングバッファをリセット
                     try:
-                        frame_shape = frame.shape if frame is not None else (480, 640, 3)
-                        live_stack.dark_frame = np.zeros(frame_shape, dtype=np.uint8)
+                        live_stack.dark_frame = None
                         live_stack.dark_buffer = []
                         dark_frame_set = False
                         print("ダークフレームとリングバッファをリセットしました。")
@@ -724,7 +723,7 @@ def main():
                     
                     # カメラ切り替え時にバッファとスタックをリセット
                     live_stack.reset()
-                    live_stack.dark_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                    live_stack.dark_frame = None
                     live_stack.dark_buffer = []
                     dark_frame_set = False
                     print("カメラ切り替えに伴いバッファとスタックをリセットしました")
@@ -785,8 +784,7 @@ def main():
 
                 # ダークフレームとリングバッファをリセット
                 try:
-                    frame_shape = frame.shape if frame is not None else (480, 640, 3)
-                    live_stack.dark_frame = np.zeros(frame_shape, dtype=np.uint8)
+                    live_stack.dark_frame = None
                     live_stack.dark_buffer = []  # リングバッファをリセット
                     dark_frame_set = False
                     print("ダークフレームとリングバッファをリセットしました。")
@@ -805,8 +803,7 @@ def main():
 
                 # ダークフレームとリングバッファをリセット
                 try:
-                    frame_shape = frame.shape if frame is not None else (480, 640, 3)
-                    live_stack.dark_frame = np.zeros(frame_shape, dtype=np.uint8)
+                    live_stack.dark_frame = None
                     live_stack.dark_buffer = []  # リングバッファをリセット
                     dark_frame_set = False
                     print("ダークフレームとリングバッファをリセットしました。")
