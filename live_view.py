@@ -11,6 +11,7 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), 'common'))
 
 from camera_config import CameraConfig
+from hist_overlay import draw_hist_ccdf_overlay
 import cv2
 import time
 
@@ -52,6 +53,14 @@ def main():
             # カメラ情報をフレームに表示
             cv2.putText(frame_bgr, f"Camera {current_camera} Size:{w}x{h}", (10, 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+            # 共通ヒストグラム+CCDFオーバーレイ表示
+            frame_bgr = draw_hist_ccdf_overlay(
+                frame_bgr,
+                frame_bgr,
+                brightness_threshold=255,
+                stop_ratio=0.10,
+            )
             
             # プレビュー表示
             cv2.imshow("Live View", frame_bgr)

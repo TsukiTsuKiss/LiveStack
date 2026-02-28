@@ -10,6 +10,7 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), 'common'))
 
 from camera_config import CameraConfig
+from hist_overlay import draw_hist_ccdf_overlay
 import cv2
 import numpy as np
 import time
@@ -53,12 +54,23 @@ def fit_display_frame(frame, screen_size=None, ratio=0.85, fallback_height=600):
     new_h = max(1, int(h * scale))
     return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
+
+def draw_ccdf_overlay(target_frame, source_frame, brightness_threshold=255, stop_ratio=0.10):
+    return draw_hist_ccdf_overlay(
+        target_frame,
+        source_frame,
+        brightness_threshold=brightness_threshold,
+        stop_ratio=stop_ratio,
+    )
+
 class LiveStack:
     """LiveStack処理クラス"""
     
     def __init__(self, max_frames=100, verbose=False):  # max_framesを100に変更
         self.max_frames = max_frames  # max_framesをリングバッファサイズとして明確化
         self.verbose = verbose  # デバッグ出力制御
+        self.overflow_ratio_threshold = 0.10  # 打ち切り比率（例: 0.10 = 10%）
+        self.brightness_threshold = 255  # 打ち切り輝度しきい値（各チャンネル）
         self.reset()
         self.buffer = [None] * max_frames  # Noneで初期化
         self.buffer_index = 0
@@ -168,16 +180,16 @@ class LiveStack:
                 
                 self.stack_count += 1
                 
-                # オーバーフロー検出（画面の10%が255に達したかチェック）
+                # オーバーフロー検出（設定した比率・輝度しきい値で判定）
                 if self.fixed_stack_count is None:
-                    # 全チャンネルが255（真っ白）のピクセルを検出
-                    white_pixels = np.sum(np.all(self.stacked_image >= 255, axis=2))
+                    # 全チャンネルがしきい値以上のピクセルを検出
+                    white_pixels = np.sum(np.all(self.stacked_image >= self.brightness_threshold, axis=2))
                     total_pixels = self.stacked_image.shape[0] * self.stacked_image.shape[1]
                     overflow_ratio = white_pixels / total_pixels
                     
-                    if overflow_ratio >= 0.10:  # 10%オーバーフロー
+                    if overflow_ratio >= self.overflow_ratio_threshold:
                         self.fixed_stack_count = self.stack_count
-                        print(f"*** オーバーフロー検出: {overflow_ratio:.3f} (10%以上) スタック数固定: {self.fixed_stack_count} ***")
+                        print(f"*** オーバーフロー検出: ratio={overflow_ratio:.3f} >= {self.overflow_ratio_threshold:.3f}, threshold={self.brightness_threshold} スタック数固定: {self.fixed_stack_count} ***")
                 
                 # 最大スタック数を制限（固定値がある場合はそれを使用）
                 max_count = self.fixed_stack_count if self.fixed_stack_count else self.max_frames
@@ -267,12 +279,12 @@ class LiveStack:
             display_frame += aligned_past_frame
             valid_stack_count += 1
 
-            # オーバーフロー条件のチェック
-            white_pixels = np.sum(np.all(display_frame >= 255, axis=2))
+            # オーバーフロー条件のチェック（設定した比率・輝度しきい値）
+            white_pixels = np.sum(np.all(display_frame >= self.brightness_threshold, axis=2))
             total_pixels = display_frame.shape[0] * display_frame.shape[1]
             overflow_ratio = white_pixels / total_pixels
-            if overflow_ratio >= 0.10:
-                print("オーバーフロー条件に達しました。スタック処理を終了します。")
+            if overflow_ratio >= self.overflow_ratio_threshold:
+                print(f"オーバーフロー条件に達しました (ratio={overflow_ratio:.3f} >= {self.overflow_ratio_threshold:.3f}, threshold={self.brightness_threshold})。スタック処理を終了します。")
                 break
 
         self.stack_count = valid_stack_count  # 有効なスタック数を更新
@@ -348,6 +360,20 @@ class SettingsMenu:
             {
                 "name": "Info Display", 
                 "value": True
+            },
+            {
+                "name": "Stop Threshold",
+                "value": 255,
+                "min": 127,
+                "max": 255,
+                "step": 5
+            },
+            {
+                "name": "Stop Ratio(%)",
+                "value": 10,
+                "min": 1,
+                "max": 50,
+                "step": 1
             }
         ]
         self.selected_item = 0
@@ -376,8 +402,7 @@ class SettingsMenu:
         elif key in [83, 3, 67]:  # 右矢印
             self.change_value(1)
             return True
-        elif key == 13:  # Enter - 設定適用
-            self.menu_active = False
+        elif key in [10, 13]:  # Enter(LF/CR) - 設定適用（メニューは閉じない）
             self.apply_requested = True
             return True
         elif key == 27:  # ESC - キャンセル
@@ -435,6 +460,14 @@ class SettingsMenu:
         
         elif setting["name"] == "Info Display":
             setting["value"] = not setting["value"]
+
+        elif setting["name"] == "Stop Ratio(%)":
+            new_value = setting["value"] + (direction * setting["step"])
+            setting["value"] = max(setting["min"], min(setting["max"], new_value))
+
+        elif setting["name"] == "Stop Threshold":
+            new_value = setting["value"] + (direction * setting["step"])
+            setting["value"] = max(setting["min"], min(setting["max"], new_value))
     
     def get_exposure_text(self, exposure_us):
         """露出時間をわかりやすいテキストに変換"""
@@ -482,6 +515,10 @@ class SettingsMenu:
                 value_text = "ON" if setting["value"] else "OFF"
             elif setting["name"] == "Info Display":
                 value_text = "ON" if setting["value"] else "OFF"
+            elif setting["name"] == "Stop Ratio(%)":
+                value_text = f"{int(setting['value'])}%"
+            elif setting["name"] == "Stop Threshold":
+                value_text = f"{int(setting['value'])}"
             elif setting["name"] == "Gain":
                 value_text = f"{setting['value']:.1f}"
             else:
@@ -505,10 +542,12 @@ class SettingsMenu:
             "exposure": self.settings[3]["value"],
             "max_frames": int(self.settings[4]["value"]),
             "stack_mode": self.settings[5]["value"],
-            "info_display": self.settings[6]["value"]
+            "info_display": self.settings[6]["value"],
+            "stop_threshold": int(self.settings[7]["value"]),
+            "stop_ratio_percent": int(self.settings[8]["value"])
         }
     
-    def set_current_values(self, camera, gain, exposure, max_frames, stack_mode, info_display=True, size_label="N/A"):
+    def set_current_values(self, camera, gain, exposure, max_frames, stack_mode, info_display=True, size_label="N/A", stop_ratio_percent=10, stop_threshold=255):
         """現在の設定値を更新"""
         self.settings[0]["value"] = camera
         self.settings[1]["value"] = size_label
@@ -517,6 +556,8 @@ class SettingsMenu:
         self.settings[4]["value"] = max_frames
         self.settings[5]["value"] = stack_mode
         self.settings[6]["value"] = info_display
+        self.settings[7]["value"] = max(self.settings[7]["min"], min(self.settings[7]["max"], int(stop_threshold)))
+        self.settings[8]["value"] = max(self.settings[8]["min"], min(self.settings[8]["max"], int(stop_ratio_percent)))
 
     def set_size_choices(self, size_labels, current_label=None):
         """Size項目の選択肢を更新"""
@@ -630,7 +671,17 @@ def main():
     screen_size = get_screen_size()
     
     # 設定メニューの初期値を設定
-    settings_menu.set_current_values(current_camera, current_gain, current_exposure, 100, stacking_enabled, info_display, current_size_label)
+    settings_menu.set_current_values(
+        current_camera,
+        current_gain,
+        current_exposure,
+        100,
+        stacking_enabled,
+        info_display,
+        current_size_label,
+        int(live_stack.overflow_ratio_threshold * 100),
+        live_stack.brightness_threshold,
+    )
 
     try:
         picam2.start()
@@ -639,6 +690,7 @@ def main():
         while True:
             # フレーム取得
             frame = picam2.capture_array()
+            h, w = frame.shape[:2]
 
             # リングバッファにフレームを追加
             live_stack.add_to_buffer(frame)
@@ -654,45 +706,42 @@ def main():
                 
                 # 表示用フレーム（テキスト情報あり）
                 display_frame = stacked_result.copy()
-                
-                # 情報表示がONの場合のみテキストを表示
-                if info_display:
-                    cv2.putText(display_frame, "Live Stack Mode", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-                    
-                    # 加算しているフレーム数を表示
-                    stack_info = f"Frames: {live_stack.stack_count}"
-                    cv2.putText(display_frame, stack_info, (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-
-                    # ダークフレーム取得状態を表示
-                    if dark_frame_set:
-                        cv2.putText(display_frame, "Dark Frame Set", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             else:
                 # 保存用フレーム（テキスト情報なし）
                 save_frame = cv2.convertScaleAbs(frame, alpha=1.5, beta=20)
                 
                 # 表示用フレーム
                 display_frame = save_frame.copy()
-                
-                # 情報表示がONの場合のみテキストを表示
-                if info_display:
-                    cv2.putText(display_frame, "Live View Mode", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-
-                    # ダークフレーム取得状態を表示
-                    if dark_frame_set:
-                        cv2.putText(display_frame, "Dark Frame Set", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-
-            # カメラ設定情報を表示（情報表示がONの場合のみ）
-            if info_display:
-                h, w = frame.shape[:2]
-                camera_info = f"Cam{current_camera} Gain:{current_gain} Exp:{settings_menu.get_exposure_text(current_exposure)} Size:{w}x{h}"
-                cv2.putText(display_frame, camera_info, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-            
-            # 設定メニューが有効な場合は描画
-            if settings_menu.menu_active:
-                display_frame = settings_menu.draw_menu(display_frame)
 
             # 表示用にのみ縮小（内部処理・保存用フレームは元解像度のまま）
             preview_frame = fit_display_frame(display_frame, screen_size=screen_size, ratio=0.85, fallback_height=600)
+
+            # 情報表示は縮小後フレームに描画（高解像度入力時の可読性改善）
+            if info_display:
+                mode_text = "Live Stack Mode" if stacking_enabled else "Live View Mode"
+                cv2.putText(preview_frame, mode_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
+                camera_info = f"Cam{current_camera} Gain:{current_gain} Exp:{settings_menu.get_exposure_text(current_exposure)} Size:{w}x{h}"
+                cv2.putText(preview_frame, camera_info, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+
+                if stacking_enabled:
+                    stack_info = f"Frames: {live_stack.stack_count}"
+                    cv2.putText(preview_frame, stack_info, (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+                if dark_frame_set:
+                    cv2.putText(preview_frame, "Dark Frame Set", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+
+                # 累積ヒストグラム(CDF)を表示
+                preview_frame = draw_ccdf_overlay(
+                    preview_frame,
+                    save_frame,
+                    brightness_threshold=live_stack.brightness_threshold,
+                    stop_ratio=live_stack.overflow_ratio_threshold,
+                )
+
+            # 設定メニューは縮小後フレームに描画
+            if settings_menu.menu_active:
+                preview_frame = settings_menu.draw_menu(preview_frame)
             
             # プレビュー表示
             cv2.imshow("Live Stack", preview_frame)
@@ -822,6 +871,20 @@ def main():
                 if values["info_display"] != info_display:
                     info_display = values["info_display"]
                     print(f"情報表示: {'ON' if info_display else 'OFF'}")
+
+                # スタック停止条件（比率・しきい値）を適用
+                new_overflow_ratio_threshold = max(0.01, min(0.50, values["stop_ratio_percent"] / 100.0))
+                new_brightness_threshold = max(127, min(255, values["stop_threshold"]))
+                if (
+                    abs(new_overflow_ratio_threshold - live_stack.overflow_ratio_threshold) > 1e-9
+                    or new_brightness_threshold != live_stack.brightness_threshold
+                ):
+                    live_stack.overflow_ratio_threshold = new_overflow_ratio_threshold
+                    live_stack.brightness_threshold = new_brightness_threshold
+                    print(
+                        f"停止条件: Ratio={int(live_stack.overflow_ratio_threshold * 100)}% "
+                        f"Threshold>={live_stack.brightness_threshold}"
+                    )
                 
                 continue
             
@@ -832,7 +895,17 @@ def main():
                 settings_menu.menu_active = not settings_menu.menu_active
                 if settings_menu.menu_active:
                     # 現在の設定値をメニューに反映
-                    settings_menu.set_current_values(current_camera, current_gain, current_exposure, live_stack.max_frames, stacking_enabled, info_display, current_size_label)
+                    settings_menu.set_current_values(
+                        current_camera,
+                        current_gain,
+                        current_exposure,
+                        live_stack.max_frames,
+                        stacking_enabled,
+                        info_display,
+                        current_size_label,
+                        int(live_stack.overflow_ratio_threshold * 100),
+                        live_stack.brightness_threshold,
+                    )
                     print("設定メニューを開きました")
                 else:
                     print("設定メニューを閉じました")
