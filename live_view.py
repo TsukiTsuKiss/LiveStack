@@ -46,9 +46,11 @@ def main():
             
             # 軽微な輝度調整
             frame_bgr = cv2.convertScaleAbs(frame, alpha=1.2, beta=10)
+
+            h, w = frame.shape[:2]
             
             # カメラ情報をフレームに表示
-            cv2.putText(frame_bgr, f"Camera {current_camera}", (10, 30), 
+            cv2.putText(frame_bgr, f"Camera {current_camera} Size:{w}x{h}", (10, 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             
             # プレビュー表示

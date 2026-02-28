@@ -17,6 +17,42 @@ from astropy.io import fits  # FITS保存用ライブラリをインポート
 from PIL import Image, ExifTags
 import piexif
 
+
+def get_screen_size():
+    """画面サイズを取得（取得不可時はNone）"""
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        width = root.winfo_screenwidth()
+        height = root.winfo_screenheight()
+        root.destroy()
+        if width > 0 and height > 0:
+            return width, height
+    except Exception:
+        pass
+    return None
+
+
+def fit_display_frame(frame, screen_size=None, ratio=0.85, fallback_height=600):
+    """表示フレームのみ画面サイズに収まるよう縮小（内部処理用フレームは変更しない）"""
+    h, w = frame.shape[:2]
+
+    if screen_size is not None:
+        max_w = int(screen_size[0] * ratio)
+        max_h = int(screen_size[1] * ratio)
+    else:
+        max_h = fallback_height
+        max_w = int((w / max(1, h)) * max_h)
+
+    if w <= max_w and h <= max_h:
+        return frame
+
+    scale = min(max_w / max(1, w), max_h / max(1, h))
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+    return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
 class LiveStack:
     """LiveStack処理クラス"""
     
@@ -257,11 +293,17 @@ class SettingsMenu:
     """設定メニュークラス"""
     
     def __init__(self):
+        self.apply_requested = False
         self.settings = [
             {
                 "name": "Camera", 
                 "value": 0,  # カメラ番号
                 "values": [0, 1]  # 利用可能なカメラ番号
+            },
+            {
+                "name": "Size",
+                "value": "N/A",
+                "values": ["N/A"]
             },
             {
                 "name": "Gain", 
@@ -315,6 +357,8 @@ class SettingsMenu:
         """キー入力処理"""
         if not self.menu_active:
             return False
+
+        self.apply_requested = False
         
         # デバッグ用：キー値を表示
         print(f"設定メニューキー入力: {key}")
@@ -334,6 +378,7 @@ class SettingsMenu:
             return True
         elif key == 13:  # Enter - 設定適用
             self.menu_active = False
+            self.apply_requested = True
             return True
         elif key == 27:  # ESC - キャンセル
             self.menu_active = False
@@ -368,6 +413,17 @@ class SettingsMenu:
                 current_index = min(range(len(values)), key=lambda i: abs(values[i] - setting["value"]))
             
             new_index = max(0, min(len(values)-1, current_index + direction))
+            setting["value"] = values[new_index]
+
+        elif setting["name"] == "Size":
+            values = setting.get("values", [])
+            if not values:
+                return
+            try:
+                current_index = values.index(setting["value"])
+            except ValueError:
+                current_index = 0
+            new_index = (current_index + direction) % len(values)
             setting["value"] = values[new_index]
             
         elif setting["name"] == "Max Frames":
@@ -420,6 +476,8 @@ class SettingsMenu:
                 value_text = f"{setting['value']}"
             elif setting["name"] == "Exposure":
                 value_text = self.get_exposure_text(setting["value"])
+            elif setting["name"] == "Size":
+                value_text = setting["value"]
             elif setting["name"] == "Stack Mode":
                 value_text = "ON" if setting["value"] else "OFF"
             elif setting["name"] == "Info Display":
@@ -442,21 +500,36 @@ class SettingsMenu:
         """現在の設定値を辞書で返す"""
         return {
             "camera": self.settings[0]["value"],
-            "gain": self.settings[1]["value"],
-            "exposure": self.settings[2]["value"],
-            "max_frames": int(self.settings[3]["value"]),
-            "stack_mode": self.settings[4]["value"],
-            "info_display": self.settings[5]["value"]
+            "size_label": self.settings[1]["value"],
+            "gain": self.settings[2]["value"],
+            "exposure": self.settings[3]["value"],
+            "max_frames": int(self.settings[4]["value"]),
+            "stack_mode": self.settings[5]["value"],
+            "info_display": self.settings[6]["value"]
         }
     
-    def set_current_values(self, camera, gain, exposure, max_frames, stack_mode, info_display=True):
+    def set_current_values(self, camera, gain, exposure, max_frames, stack_mode, info_display=True, size_label="N/A"):
         """現在の設定値を更新"""
         self.settings[0]["value"] = camera
-        self.settings[1]["value"] = gain
-        self.settings[2]["value"] = exposure
-        self.settings[3]["value"] = max_frames
-        self.settings[4]["value"] = stack_mode
-        self.settings[5]["value"] = info_display
+        self.settings[1]["value"] = size_label
+        self.settings[2]["value"] = gain
+        self.settings[3]["value"] = exposure
+        self.settings[4]["value"] = max_frames
+        self.settings[5]["value"] = stack_mode
+        self.settings[6]["value"] = info_display
+
+    def set_size_choices(self, size_labels, current_label=None):
+        """Size項目の選択肢を更新"""
+        if not size_labels:
+            self.settings[1]["values"] = ["N/A"]
+            self.settings[1]["value"] = "N/A"
+            return
+
+        self.settings[1]["values"] = size_labels
+        if current_label in size_labels:
+            self.settings[1]["value"] = current_label
+        else:
+            self.settings[1]["value"] = size_labels[0]
 
 def save_fits(image, filename, metadata):
     """FITS形式でRGB画像を保存"""
@@ -479,10 +552,28 @@ def save_fits(image, filename, metadata):
     hdu.writeto(filename, overwrite=True)
     print(f"FITSファイル保存: {filename}")
 
-def create_camera_safely(camera_num, current_gain, current_exposure, low_light_mode=False):
+def size_to_label(size):
+    if size is None:
+        return "N/A"
+    return f"{size[0]}x{size[1]}"
+
+
+def label_to_size(label):
+    if not label or label == "N/A":
+        return None
+    try:
+        w_str, h_str = label.split("x")
+        return int(w_str), int(h_str)
+    except Exception:
+        return None
+
+
+def create_camera_safely(camera_num, current_gain, current_exposure, low_light_mode=False, selected_size=None):
     """カメラを安全に作成する（エラーハンドリング付き）"""
     try:
-        if low_light_mode:
+        if selected_size is not None:
+            picam2 = CameraConfig.create_camera_with_size(camera_num, size=selected_size, buffer_count=1)
+        elif low_light_mode:
             picam2 = CameraConfig.create_low_light_camera(camera_num)
         else:
             picam2 = CameraConfig.create_fast_camera(camera_num)
@@ -514,12 +605,16 @@ def main():
     
     # カメラ初期化
     current_camera = 0
-    high_res_mode = False
     low_light_mode = False
     current_gain = 2.0
     current_exposure = 16667  # 1/60秒
+
+    available_sizes = CameraConfig.get_available_sizes(current_camera)
+    size_labels = [size_to_label(size) for size in available_sizes]
+    current_size_label = size_labels[0] if size_labels else "N/A"
+    settings_menu.set_size_choices(size_labels, current_size_label)
     
-    picam2 = create_camera_safely(current_camera, current_gain, current_exposure, low_light_mode)
+    picam2 = create_camera_safely(current_camera, current_gain, current_exposure, low_light_mode, label_to_size(current_size_label))
     
     if picam2 is None:
         print("カメラの初期化に失敗しました。")
@@ -532,9 +627,10 @@ def main():
     stacking_enabled = False
     dark_frame_set = False  # ダークフレーム取得状態を管理
     info_display = True  # 情報表示フラグ
+    screen_size = get_screen_size()
     
     # 設定メニューの初期値を設定
-    settings_menu.set_current_values(current_camera, current_gain, current_exposure, 100, stacking_enabled, info_display)
+    settings_menu.set_current_values(current_camera, current_gain, current_exposure, 100, stacking_enabled, info_display, current_size_label)
 
     try:
         picam2.start()
@@ -587,21 +683,28 @@ def main():
 
             # カメラ設定情報を表示（情報表示がONの場合のみ）
             if info_display:
-                camera_info = f"Cam{current_camera} Gain:{current_gain} Exp:{settings_menu.get_exposure_text(current_exposure)}"
+                h, w = frame.shape[:2]
+                camera_info = f"Cam{current_camera} Gain:{current_gain} Exp:{settings_menu.get_exposure_text(current_exposure)} Size:{w}x{h}"
                 cv2.putText(display_frame, camera_info, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
             
             # 設定メニューが有効な場合は描画
             if settings_menu.menu_active:
                 display_frame = settings_menu.draw_menu(display_frame)
+
+            # 表示用にのみ縮小（内部処理・保存用フレームは元解像度のまま）
+            preview_frame = fit_display_frame(display_frame, screen_size=screen_size, ratio=0.85, fallback_height=600)
             
             # プレビュー表示
-            cv2.imshow("Live Stack", display_frame)
+            cv2.imshow("Live Stack", preview_frame)
             
             # キー入力処理
             key = cv2.waitKey(1) & 0xFF
             
             # 設定メニューのキー処理（優先）
             if settings_menu.handle_key(key):
+                if not settings_menu.apply_requested:
+                    continue
+
                 # 設定が変更された場合の処理
                 values = settings_menu.get_current_values()
                 
@@ -615,7 +718,12 @@ def main():
                     picam2.close()
                     
                     # 新しいカメラを作成
-                    new_picam2 = create_camera_safely(new_camera, current_gain, current_exposure, low_light_mode)
+                    new_available_sizes = CameraConfig.get_available_sizes(new_camera)
+                    new_size_labels = [size_to_label(size) for size in new_available_sizes]
+                    requested_size_label = values["size_label"]
+                    target_size_label = requested_size_label if requested_size_label in new_size_labels else (new_size_labels[0] if new_size_labels else "N/A")
+
+                    new_picam2 = create_camera_safely(new_camera, current_gain, current_exposure, low_light_mode, label_to_size(target_size_label))
                     
                     if new_picam2 is not None:
                         # 切り替え成功
@@ -634,10 +742,12 @@ def main():
                         
                         # メニューの表示を更新
                         settings_menu.settings[0]["value"] = current_camera
+                        settings_menu.set_size_choices(new_size_labels, target_size_label)
+                        current_size_label = target_size_label
                     else:
                         # 切り替え失敗、元のカメラに戻す
                         print(f"カメラ {new_camera} への切り替えに失敗。元のカメラに戻します。")
-                        picam2 = create_camera_safely(current_camera, current_gain, current_exposure, low_light_mode)
+                        picam2 = create_camera_safely(current_camera, current_gain, current_exposure, low_light_mode, label_to_size(current_size_label))
                         if picam2 is not None:
                             picam2.start()
                             time.sleep(1)
@@ -663,6 +773,36 @@ def main():
                         print("ダークフレームとリングバッファをリセットしました。")
                     except Exception as e:
                         print(f"リセット中にエラーが発生しました: {e}")
+
+                # Size設定を適用
+                if values["size_label"] != current_size_label:
+                    previous_size_label = current_size_label
+                    current_size_label = values["size_label"]
+                    print(f"サイズ: {current_size_label}")
+
+                    picam2.stop()
+                    picam2.close()
+                    picam2 = create_camera_safely(current_camera, current_gain, current_exposure, low_light_mode, label_to_size(current_size_label))
+                    if picam2 is not None:
+                        picam2.start()
+                        time.sleep(1)
+                        live_stack.reset()
+                        live_stack.dark_frame = None
+                        live_stack.dark_buffer = []
+                        dark_frame_set = False
+                        print("サイズ変更に伴いカメラを再初期化し、バッファとスタックをリセットしました")
+                    else:
+                        print("サイズ変更後のカメラ初期化に失敗。前の設定で復旧を試みます。")
+                        current_size_label = previous_size_label
+                        settings_menu.settings[1]["value"] = current_size_label
+                        picam2 = create_camera_safely(current_camera, current_gain, current_exposure, low_light_mode, label_to_size(current_size_label))
+                        if picam2 is not None:
+                            picam2.start()
+                            time.sleep(1)
+                            print("前のサイズ設定で復旧しました。")
+                        else:
+                            print("カメラの復旧にも失敗しました。")
+                            break
                 
                 # Max Frames設定を適用
                 if values["max_frames"] != live_stack.max_frames:
@@ -692,13 +832,13 @@ def main():
                 settings_menu.menu_active = not settings_menu.menu_active
                 if settings_menu.menu_active:
                     # 現在の設定値をメニューに反映
-                    settings_menu.set_current_values(current_camera, current_gain, current_exposure, live_stack.max_frames, stacking_enabled, info_display)
+                    settings_menu.set_current_values(current_camera, current_gain, current_exposure, live_stack.max_frames, stacking_enabled, info_display, current_size_label)
                     print("設定メニューを開きました")
                 else:
                     print("設定メニューを閉じました")
             elif key == ord("i"):  # 情報表示ON/OFF
                 info_display = not info_display
-                settings_menu.settings[5]["value"] = info_display  # メニューも同期
+                settings_menu.settings[6]["value"] = info_display  # メニューも同期
                 print(f"情報表示: {'ON' if info_display else 'OFF'}")
             elif key == ord("c"):  # カメラ切り替え
                 print("カメラを切り替え中...")
@@ -711,7 +851,11 @@ def main():
                 next_camera = 1 - current_camera
                 
                 # 新しいカメラを作成
-                new_picam2 = create_camera_safely(next_camera, current_gain, current_exposure, low_light_mode)
+                next_available_sizes = CameraConfig.get_available_sizes(next_camera)
+                next_size_labels = [size_to_label(size) for size in next_available_sizes]
+                target_size_label = current_size_label if current_size_label in next_size_labels else (next_size_labels[0] if next_size_labels else "N/A")
+
+                new_picam2 = create_camera_safely(next_camera, current_gain, current_exposure, low_light_mode, label_to_size(target_size_label))
                 
                 if new_picam2 is not None:
                     # 切り替え成功
@@ -730,10 +874,12 @@ def main():
                     
                     # メニューの表示も同期
                     settings_menu.settings[0]["value"] = current_camera
+                    settings_menu.set_size_choices(next_size_labels, target_size_label)
+                    current_size_label = target_size_label
                 else:
                     # 切り替え失敗、元のカメラに戻す
                     print(f"カメラ {next_camera} への切り替えに失敗。元のカメラに戻します。")
-                    picam2 = create_camera_safely(current_camera, current_gain, current_exposure, low_light_mode)
+                    picam2 = create_camera_safely(current_camera, current_gain, current_exposure, low_light_mode, label_to_size(current_size_label))
                     if picam2 is not None:
                         picam2.start()
                         time.sleep(1)
@@ -753,7 +899,7 @@ def main():
                 print(f"画像保存: {filename}")
             elif key == ord("t"):
                 stacking_enabled = not stacking_enabled
-                settings_menu.settings[4]["value"] = stacking_enabled  # メニューも同期
+                settings_menu.settings[5]["value"] = stacking_enabled  # メニューも同期
                 if stacking_enabled:
                     print("LiveStack 有効")
                     live_stack.reset()
@@ -778,7 +924,7 @@ def main():
                     ord("0"): 2000
                 }
                 current_exposure = exposure_times[key]
-                settings_menu.settings[2]["value"] = current_exposure  # メニューも同期
+                settings_menu.settings[3]["value"] = current_exposure  # メニューも同期
                 CameraConfig.apply_camera_settings(picam2, current_exposure, current_gain)
                 print(f"露出: {settings_menu.get_exposure_text(current_exposure)}")
 
@@ -797,7 +943,7 @@ def main():
                     current_gain = min(8.0, current_gain + 0.5)
                 elif key == ord("-"):
                     current_gain = max(1.0, current_gain - 0.5)
-                settings_menu.settings[1]["value"] = current_gain  # メニューも同期
+                settings_menu.settings[2]["value"] = current_gain  # メニューも同期
                 CameraConfig.apply_camera_settings(picam2, current_exposure, current_gain)
                 print(f"ゲイン: {current_gain}")
 
