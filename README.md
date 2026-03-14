@@ -52,6 +52,8 @@ camera-live/
 - `s`: 画像保存  
 - `t`: LiveStack ON/OFF切り替え
 - `r`: スタックリセット
+- `h`: 左右反転トグル
+- `v`: 上下反転トグル
 - `d`: ダークフレーム取得
 
 **保存操作:**
@@ -136,6 +138,11 @@ python3 live_stack.py
 python3 live_stack.py --max-frames 50
 python3 live_stack.py -n 50
 
+# フリップを指定して起動
+python3 live_stack.py --flip-h          # 左右反転
+python3 live_stack.py --flip-v          # 上下反転
+python3 live_stack.py --flip-h --flip-v # 両方
+
 # ヘルプ
 python3 live_stack.py --help
 ```
@@ -205,6 +212,7 @@ pip install astropy Pillow piexif opencv-python picamera2
 
 #### 2026/03/14 機能追加
 - **コマンドライン引数対応**: `-n` / `--max-frames` オプションで起動時に最大スタックフレーム数を指定可能（デフォルト: 100）
+- **フリップ機能追加**: `--flip-h`（左右反転）・`--flip-v`（上下反転）オプションで起動時の反転を指定可能。`h`/`v`キーでトグル切り替えも可能。反転は出力側で即時反映
 
 #### 2026/02/28 統計表示・停止条件調整
 - **ヒストグラム追加**: 右上に統計グラフ（ヒストグラム + CCDF）を表示し、閾値/比率の判定を可視化。

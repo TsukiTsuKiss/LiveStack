@@ -631,6 +631,10 @@ def main():
     parser = argparse.ArgumentParser(description="LiveStack機能付きカメラプレビュー")
     parser.add_argument("-n", "--max-frames", type=int, default=100,
                         help="最大スタックフレーム数 (デフォルト: 100)")
+    parser.add_argument("--flip-h", action="store_true",
+                        help="左右反転して起動")
+    parser.add_argument("--flip-v", action="store_true",
+                        help="上下反転して起動")
     args = parser.parse_args()
 
     print("Live Stack - LiveStack機能付きカメラプレビュー（カメラ切り替え機能付き）")
@@ -642,6 +646,8 @@ def main():
     print("  [s] 保存")
     print("  [t] LiveStack ON/OFF")
     print("  [r] スタックリセット")
+    print("  [h] 左右反転トグル")
+    print("  [v] 上下反転トグル")
     print("  [d] ダークフレーム取得")
     print("  [f] FITS保存  [j] JPEG保存  [p] PNG保存")
     print("従来のキー操作:")
@@ -672,6 +678,12 @@ def main():
     # LiveStack初期化
     live_stack = LiveStack(max_frames=args.max_frames)
     print(f"最大スタックフレーム数: {args.max_frames}")
+
+    # フリップ設定初期化
+    flip_h = args.flip_h  # 左右反転
+    flip_v = args.flip_v  # 上下反転
+    if flip_h or flip_v:
+        print(f"フリップ: {'H' if flip_h else ''}{' V' if flip_v else ''}".strip())
     stacking_enabled = False
     dark_frame_set = False  # ダークフレーム取得状態を管理
     info_display = True  # 情報表示フラグ
@@ -719,6 +731,17 @@ def main():
                 
                 # 表示用フレーム
                 display_frame = save_frame.copy()
+
+            # フリップ処理（出力側で即時反映）
+            if flip_h and flip_v:
+                save_frame = cv2.flip(save_frame, -1)
+                display_frame = cv2.flip(display_frame, -1)
+            elif flip_h:
+                save_frame = cv2.flip(save_frame, 1)
+                display_frame = cv2.flip(display_frame, 1)
+            elif flip_v:
+                save_frame = cv2.flip(save_frame, 0)
+                display_frame = cv2.flip(display_frame, 0)
 
             # 表示用にのみ縮小（内部処理・保存用フレームは元解像度のまま）
             preview_frame = fit_display_frame(display_frame, screen_size=screen_size, ratio=0.85, fallback_height=600)
@@ -989,6 +1012,12 @@ def main():
                 if stacking_enabled:
                     live_stack.reset()
                     print("スタックリセット - 次のフレームから再開")
+            elif key == ord("h"):  # 左右反転トグル
+                flip_h = not flip_h
+                print(f"左右反転: {'ON' if flip_h else 'OFF'}")
+            elif key == ord("v"):  # 上下反転トグル
+                flip_v = not flip_v
+                print(f"上下反転: {'ON' if flip_v else 'OFF'}")
             elif key in [ord("1"), ord("2"), ord("3"), ord("4"), ord("5"), ord("6"), ord("7"), ord("8"), ord("9"), ord("0")]:
                 # シャッター速度変更
                 exposure_times = {
