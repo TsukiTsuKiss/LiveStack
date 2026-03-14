@@ -7,6 +7,7 @@ LiveStack機能付きカメラプレビューアプリケーション
 """
 import sys
 import os
+import argparse
 sys.path.append(os.path.join(os.path.dirname(__file__), 'common'))
 
 from camera_config import CameraConfig
@@ -627,6 +628,11 @@ def create_camera_safely(camera_num, current_gain, current_exposure, low_light_m
         return None
 
 def main():
+    parser = argparse.ArgumentParser(description="LiveStack機能付きカメラプレビュー")
+    parser.add_argument("-n", "--max-frames", type=int, default=100,
+                        help="最大スタックフレーム数 (デフォルト: 100)")
+    args = parser.parse_args()
+
     print("Live Stack - LiveStack機能付きカメラプレビュー（カメラ切り替え機能付き）")
     print("操作:")
     print("  [q] 終了")
@@ -664,7 +670,8 @@ def main():
     print(f"カメラ {current_camera} を使用中")
     
     # LiveStack初期化
-    live_stack = LiveStack(max_frames=100)  # max_framesを100に変更
+    live_stack = LiveStack(max_frames=args.max_frames)
+    print(f"最大スタックフレーム数: {args.max_frames}")
     stacking_enabled = False
     dark_frame_set = False  # ダークフレーム取得状態を管理
     info_display = True  # 情報表示フラグ
@@ -675,7 +682,7 @@ def main():
         current_camera,
         current_gain,
         current_exposure,
-        100,
+        args.max_frames,
         stacking_enabled,
         info_display,
         current_size_label,

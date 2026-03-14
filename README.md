@@ -71,7 +71,7 @@ camera-live/
 - **Size**: カメラごとの利用可能解像度一覧（例: `640x480`、`1456x1088`）から選択
 - **Gain**: 1.0～8.0（0.5刻み） - カメラの感度調整
 - **Exposure**: 10秒～1/2000秒（15段階） - 露出時間、天体撮影向けの長時間露出対応
-- **Max Frames**: 1～100（1刻み） - スタッキングに使用する最大フレーム数
+- **Max Frames**: 1～100（1列み） - スタッキングに使用する最大フレーム数（起動時に`--max-frames`オプションで初期値を変更可）
 - **Stack Mode**: ON/OFF - LiveStackモードの切り替え
 - **Info Display**: ON/OFF - 画面上の情報表示切り替え
 - **Stop Threshold**: 127～255（5刻み） - 「閾値を超えた画素」を判定する輝度しきい値
@@ -131,6 +131,13 @@ python3 live_view.py
 
 # LiveStack機能付き
 python3 live_stack.py
+
+# 最大スタックフレーム数を指定して起動
+python3 live_stack.py --max-frames 50
+python3 live_stack.py -n 50
+
+# ヘルプ
+python3 live_stack.py --help
 ```
 
 ## 設定
@@ -195,6 +202,9 @@ pip install astropy Pillow piexif opencv-python picamera2
 ```
 
 ## 変更履歴
+
+#### 2026/03/14 機能追加
+- **コマンドライン引数対応**: `-n` / `--max-frames` オプションで起動時に最大スタックフレーム数を指定可能（デフォルト: 100）
 
 #### 2026/02/28 統計表示・停止条件調整
 - **ヒストグラム追加**: 右上に統計グラフ（ヒストグラム + CCDF）を表示し、閾値/比率の判定を可視化。
