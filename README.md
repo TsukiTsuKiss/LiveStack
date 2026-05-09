@@ -76,7 +76,7 @@ camera-live/
 - **Max Frames**: 1～100（1列み） - スタッキングに使用する最大フレーム数（起動時に`--max-frames`オプションで初期値を変更可）
 - **Stack Mode**: ON/OFF - LiveStackモードの切り替え
 - **Info Display**: ON/OFF - 画面上の情報表示切り替え
-- **Stop Threshold**: 127～255（5刻み） - 「閾値を超えた画素」を判定する輝度しきい値
+- **Stop Threshold**: 5～255（5刻み） - 「閾値を超えた画素」を判定する輝度しきい値
 - **Stop Ratio(%)**: 1～50（1刻み） - 停止条件となる割合
 
 **操作方法:**
@@ -147,6 +147,37 @@ python3 live_stack.py --flip-h --flip-v # 両方
 python3 live_stack.py --help
 ```
 
+## リモートソース受信（USBカメラ番号 / TCP URL）
+
+### 受信側（このアプリ）
+
+```bash
+# ローカルUSBカメラ（例: 0番）
+python3 live_view.py --source 0
+python3 live_stack.py --source 0
+
+# リモートTCPストリーム
+python3 live_view.py --source tcp://192.168.1.17:8888
+python3 live_stack.py --source tcp://192.168.1.17:8888
+```
+
+### 送信側（Raspberry Pi: rpicam-vid の例）
+
+```bash
+# 低解像度で軽量配信（確認用）
+rpicam-vid -t 0 -n --width 640 --height 400 --framerate 5 --codec h264 --listen -o tcp://0.0.0.0:8888 --bitrate 5000000
+
+# 1080p配信
+rpicam-vid -t 0 -n --width 1920 --height 1080 --framerate 5 --codec h264 --listen -o tcp://0.0.0.0:8888 --bitrate 5000000
+
+# 長時間露出 + 高ゲイン
+rpicam-vid -t 0 -n --width 1920 --height 1080 --framerate 5 --codec h264 --listen -o tcp://0.0.0.0:8888 --bitrate 5000000 --shutter 1000000 --gain 8
+```
+
+補足:
+- まずは低解像度（640x400）で疎通確認し、その後1080pへ上げると安定します。
+- 送信例は上記3本が最小セットです。必要に応じて `--shutter` / `--gain` を追加調整してください。
+
 ## 設定
 
 `common/camera_config.py`で以下を調整可能:
@@ -209,6 +240,15 @@ pip install astropy Pillow piexif opencv-python picamera2
 ```
 
 ## 変更履歴
+
+#### 2026/05/10 リモートソース対応・判定整合改善
+- **source対応**: `live_view.py` / `live_stack.py` に `--source` を追加（カメラ番号または `tcp://...` を指定可能）。
+- **Windows起動改善**: `picamera2` などの依存ライブラリを遅延import化し、`--source` 利用時に非Raspberry Pi環境でも起動可能に改善。
+- **メニュー操作改善**: `waitKeyEx` ベースに変更し、Windowsで矢印キーが正しく動作するよう修正。
+- **停止判定の整合**: 閾値超過フレームを「加算前」に判定して停止する方式へ修正。
+- **判定指標の統一**: CCDF表示と停止判定を `max(B,G,R)` で統一し、表示と判定のズレを縮小。
+- **ビット幅表示**: 入力フレームの推定ビット幅をオーバーレイ表示。
+- **Stop Thresholdの範囲拡張**: 下限を `127` から `5` に変更（5刻み）。
 
 #### 2026/03/14 機能追加
 - **コマンドライン引数対応**: `-n` / `--max-frames` オプションで起動時に最大スタックフレーム数を指定可能（デフォルト: 100）

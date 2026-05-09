@@ -24,7 +24,7 @@ def draw_hist_ccdf_overlay(target_frame, source_frame, brightness_threshold=255,
     cv2.addWeighted(overlay, 0.55, target_frame, 0.45, 0, target_frame)
 
     if len(source_frame.shape) == 3 and source_frame.shape[2] >= 3:
-        metric = np.min(source_frame[:, :, :3], axis=2).astype(np.uint8)
+        metric = np.max(source_frame[:, :, :3], axis=2).astype(np.uint8)
     else:
         metric = source_frame.astype(np.uint8)
 
@@ -83,7 +83,7 @@ def draw_hist_ccdf_overlay(target_frame, source_frame, brightness_threshold=255,
     cv2.putText(target_frame, f"T={thr}", (x0 + 8, info_y), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 255), 1)
     cv2.putText(
         target_frame,
-        f"R={int(ratio * 100)}%  P(X>=T)={overflow_at_thr * 100:.1f}%",
+        f"R={int(ratio * 100)}%  P(X>=T)={overflow_at_thr * 100:.2f}%",
         (x0 + 68, info_y),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.42,

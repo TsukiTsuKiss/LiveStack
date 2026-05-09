@@ -10,14 +10,10 @@ import os
 import argparse
 sys.path.append(os.path.join(os.path.dirname(__file__), 'common'))
 
-from camera_config import CameraConfig
 from hist_overlay import draw_hist_ccdf_overlay
 import cv2
 import numpy as np
 import time
-from astropy.io import fits  # FITS保存用ライブラリをインポート
-from PIL import Image, ExifTags
-import piexif
 
 
 def get_screen_size():
@@ -63,6 +59,64 @@ def draw_ccdf_overlay(target_frame, source_frame, brightness_threshold=255, stop
         brightness_threshold=brightness_threshold,
         stop_ratio=stop_ratio,
     )
+
+
+def normalize_frame_to_uint8(frame):
+    """入力フレームのビット幅を推定し、内部処理用に8bitへ正規化する。"""
+    if frame is None:
+        return frame, 8
+
+    if frame.dtype == np.uint8:
+        return frame, 8
+
+    if np.issubdtype(frame.dtype, np.integer):
+        observed_max = int(np.max(frame))
+        if observed_max <= 0:
+            # 画素が全て0のときはdtype幅を採用
+            bit_depth = int(np.iinfo(frame.dtype).bits)
+        else:
+            bit_depth = max(8, int(np.ceil(np.log2(observed_max + 1))))
+
+        max_value = float((1 << bit_depth) - 1)
+        normalized = np.clip(frame.astype(np.float32) * (255.0 / max_value), 0, 255).astype(np.uint8)
+        return normalized, bit_depth
+
+    # floatなどは0..255レンジを想定してクリップ
+    normalized = np.clip(frame, 0, 255).astype(np.uint8)
+    return normalized, 8
+
+
+def compute_white_ratio_uint8(frame_uint8, threshold):
+    """8bitフレームに対して P(X>=threshold) を計算する。"""
+    if frame_uint8 is None:
+        return 0.0
+    if len(frame_uint8.shape) == 3 and frame_uint8.shape[2] >= 3:
+        metric = np.max(frame_uint8[:, :, :3], axis=2)
+    else:
+        metric = frame_uint8
+    white_pixels = np.sum(metric >= int(threshold))
+    total_pixels = metric.shape[0] * metric.shape[1]
+    if total_pixels <= 0:
+        return 0.0
+    return float(white_pixels) / float(total_pixels)
+
+
+def open_capture(source):
+    """cv2.VideoCaptureを開く（ローカルカメラ時は低遅延化）"""
+    cap = cv2.VideoCapture(source)
+    if isinstance(source, int):
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    return cap
+
+
+def parse_source_arg(source_arg):
+    """source引数をint(カメラ番号)またはstr(URL)に変換"""
+    if source_arg is None:
+        return None
+    stripped = source_arg.strip()
+    if stripped.isdigit():
+        return int(stripped)
+    return stripped
 
 class LiveStack:
     """LiveStack処理クラス"""
@@ -183,9 +237,11 @@ class LiveStack:
                 
                 # オーバーフロー検出（設定した比率・輝度しきい値で判定）
                 if self.fixed_stack_count is None:
-                    # 全チャンネルがしきい値以上のピクセルを検出
-                    white_pixels = np.sum(np.all(self.stacked_image >= self.brightness_threshold, axis=2))
-                    total_pixels = self.stacked_image.shape[0] * self.stacked_image.shape[1]
+                    # ヒストグラム表示と同じ8bit空間で判定する
+                    clipped = np.clip(self.stacked_image, 0, 255).astype(np.uint8)
+                    metric = np.max(clipped[:, :, :3], axis=2)
+                    white_pixels = np.sum(metric >= self.brightness_threshold)
+                    total_pixels = clipped.shape[0] * clipped.shape[1]
                     overflow_ratio = white_pixels / total_pixels
                     
                     if overflow_ratio >= self.overflow_ratio_threshold:
@@ -252,8 +308,8 @@ class LiveStack:
             past_index = (self.buffer_index - 2 - i + self.max_frames) % self.max_frames  # 負の値を防ぐ
             past_frame = self.buffer[past_index]
             if past_frame is None:
-                print(f"フレームが存在しません: index={past_index}")
-                continue
+                # ここより古いスロットも未投入なので探索終了
+                break
 
             if self.dark_frame is not None:
                 past_frame = cv2.subtract(past_frame, self.dark_frame)  # ダークフレームを引き算
@@ -276,17 +332,24 @@ class LiveStack:
             M = np.float32([[1, 0, offset_x], [0, 1, offset_y]])
             aligned_past_frame = cv2.warpAffine(past_frame.astype(np.float32), M, (latest_frame.shape[1], latest_frame.shape[0]))
 
-            # 表示用フレームに加算
-            display_frame += aligned_past_frame
-            valid_stack_count += 1
+            # まず「このフレームを加算した結果」を評価し、
+            # 閾値を超えるならこのフレームは加算しない
+            test_frame = display_frame + aligned_past_frame
 
             # オーバーフロー条件のチェック（設定した比率・輝度しきい値）
-            white_pixels = np.sum(np.all(display_frame >= self.brightness_threshold, axis=2))
-            total_pixels = display_frame.shape[0] * display_frame.shape[1]
+            # ヒストグラム表示と同じ8bit空間で判定する
+            clipped = np.clip(test_frame, 0, 255).astype(np.uint8)
+            metric = np.max(clipped[:, :, :3], axis=2)
+            white_pixels = np.sum(metric >= self.brightness_threshold)
+            total_pixels = clipped.shape[0] * clipped.shape[1]
             overflow_ratio = white_pixels / total_pixels
             if overflow_ratio >= self.overflow_ratio_threshold:
                 print(f"オーバーフロー条件に達しました (ratio={overflow_ratio:.3f} >= {self.overflow_ratio_threshold:.3f}, threshold={self.brightness_threshold})。スタック処理を終了します。")
                 break
+
+            # 閾値未満なら加算を採用
+            display_frame = test_frame
+            valid_stack_count += 1
 
         self.stack_count = valid_stack_count  # 有効なスタック数を更新
         return np.clip(display_frame, 0, 255).astype(np.uint8)
@@ -365,7 +428,7 @@ class SettingsMenu:
             {
                 "name": "Stop Threshold",
                 "value": 255,
-                "min": 127,
+                "min": 5,
                 "max": 255,
                 "step": 5
             },
@@ -380,27 +443,40 @@ class SettingsMenu:
         self.selected_item = 0
         self.menu_active = False
     
-    def handle_key(self, key):
+    def handle_key(self, key_raw):
         """キー入力処理"""
         if not self.menu_active:
             return False
 
         self.apply_requested = False
-        
-        # デバッグ用：キー値を表示
-        print(f"設定メニューキー入力: {key}")
-        
-        # OpenCVのカーソルキー値（複数の値に対応）
-        if key in [82, 0, 65]:  # 上矢印（環境によって異なる）
+
+        # キーの下位8bit（通常キー）
+        key = key_raw & 0xFF
+
+        # waitKeyExの矢印キー値（Windows）
+        if key_raw == 2490368:  # Up
             self.selected_item = (self.selected_item - 1) % len(self.settings)
             return True
-        elif key in [84, 1, 66]:  # 下矢印
+        elif key_raw == 2621440:  # Down
             self.selected_item = (self.selected_item + 1) % len(self.settings)
             return True
-        elif key in [81, 2, 68]:  # 左矢印
+        elif key_raw == 2424832:  # Left
             self.change_value(-1)
             return True
-        elif key in [83, 3, 67]:  # 右矢印
+        elif key_raw == 2555904:  # Right
+            self.change_value(1)
+            return True
+        # 互換用（環境差異）
+        elif key in [82, 65]:  # 上
+            self.selected_item = (self.selected_item - 1) % len(self.settings)
+            return True
+        elif key in [84, 66]:  # 下
+            self.selected_item = (self.selected_item + 1) % len(self.settings)
+            return True
+        elif key in [81, 68]:  # 左
+            self.change_value(-1)
+            return True
+        elif key in [83, 67]:  # 右
             self.change_value(1)
             return True
         elif key in [10, 13]:  # Enter(LF/CR) - 設定適用（メニューは閉じない）
@@ -536,29 +612,43 @@ class SettingsMenu:
     
     def get_current_values(self):
         """現在の設定値を辞書で返す"""
+        values_by_name = {s.get("name"): s.get("value") for s in self.settings}
         return {
-            "camera": self.settings[0]["value"],
-            "size_label": self.settings[1]["value"],
-            "gain": self.settings[2]["value"],
-            "exposure": self.settings[3]["value"],
-            "max_frames": int(self.settings[4]["value"]),
-            "stack_mode": self.settings[5]["value"],
-            "info_display": self.settings[6]["value"],
-            "stop_threshold": int(self.settings[7]["value"]),
-            "stop_ratio_percent": int(self.settings[8]["value"])
+            "camera": values_by_name.get("Camera", 0),
+            "size_label": values_by_name.get("Size", "N/A"),
+            "gain": values_by_name.get("Gain", 2.0),
+            "exposure": values_by_name.get("Exposure", 16667),
+            "max_frames": int(values_by_name.get("Max Frames", 100)),
+            "stack_mode": bool(values_by_name.get("Stack Mode", False)),
+            "info_display": bool(values_by_name.get("Info Display", True)),
+            "stop_threshold": int(values_by_name.get("Stop Threshold", 255)),
+            "stop_ratio_percent": int(values_by_name.get("Stop Ratio(%)", 10)),
         }
     
     def set_current_values(self, camera, gain, exposure, max_frames, stack_mode, info_display=True, size_label="N/A", stop_ratio_percent=10, stop_threshold=255):
         """現在の設定値を更新"""
-        self.settings[0]["value"] = camera
-        self.settings[1]["value"] = size_label
-        self.settings[2]["value"] = gain
-        self.settings[3]["value"] = exposure
-        self.settings[4]["value"] = max_frames
-        self.settings[5]["value"] = stack_mode
-        self.settings[6]["value"] = info_display
-        self.settings[7]["value"] = max(self.settings[7]["min"], min(self.settings[7]["max"], int(stop_threshold)))
-        self.settings[8]["value"] = max(self.settings[8]["min"], min(self.settings[8]["max"], int(stop_ratio_percent)))
+        values = {
+            "Camera": camera,
+            "Size": size_label,
+            "Gain": gain,
+            "Exposure": exposure,
+            "Max Frames": max_frames,
+            "Stack Mode": stack_mode,
+            "Info Display": info_display,
+            "Stop Threshold": int(stop_threshold),
+            "Stop Ratio(%)": int(stop_ratio_percent),
+        }
+
+        for setting in self.settings:
+            name = setting.get("name")
+            if name not in values:
+                continue
+
+            value = values[name]
+            if name in ["Stop Threshold", "Stop Ratio(%)"] and "min" in setting and "max" in setting:
+                value = max(setting["min"], min(setting["max"], int(value)))
+
+            setting["value"] = value
 
     def set_size_choices(self, size_labels, current_label=None):
         """Size項目の選択肢を更新"""
@@ -575,6 +665,12 @@ class SettingsMenu:
 
 def save_fits(image, filename, metadata):
     """FITS形式でRGB画像を保存"""
+    try:
+        from astropy.io import fits
+    except Exception as e:
+        print(f"FITS保存に失敗: astropy が利用できません ({e})")
+        return
+
     # BGRからRGBに変換
     if len(image.shape) == 3 and image.shape[2] == 3:
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -613,6 +709,8 @@ def label_to_size(label):
 def create_camera_safely(camera_num, current_gain, current_exposure, low_light_mode=False, selected_size=None):
     """カメラを安全に作成する（エラーハンドリング付き）"""
     try:
+        from camera_config import CameraConfig
+
         if selected_size is not None:
             picam2 = CameraConfig.create_camera_with_size(camera_num, size=selected_size, buffer_count=1)
         elif low_light_mode:
@@ -627,15 +725,213 @@ def create_camera_safely(camera_num, current_gain, current_exposure, low_light_m
         print(f"カメラ {camera_num} の作成に失敗: {e}")
         return None
 
+
+def run_stream_mode(source, args):
+    """URL/カメラ番号ソースでLiveStackを実行（picamera2不要）"""
+    print(f"Live Stack - Source: {source}")
+    print("操作: [q]終了 [m]メニュー [s/j]JPEG保存 [p]PNG保存 [f]FITS保存 [t]スタックON/OFF [r]リセット [i]情報表示 [h]左右反転 [v]上下反転")
+
+    cap = open_capture(source)
+    if not cap.isOpened():
+        print(f"ソースを開けませんでした: {source}")
+        return
+
+    live_stack = LiveStack(max_frames=args.max_frames)
+    stacking_enabled = False
+    info_display = True
+    flip_h = args.flip_h
+    flip_v = args.flip_v
+    screen_size = get_screen_size()
+
+    settings_menu = SettingsMenu()
+    stream_menu_names = {"Max Frames", "Stack Mode", "Info Display", "Stop Threshold", "Stop Ratio(%)"}
+    settings_menu.settings = [s for s in settings_menu.settings if s["name"] in stream_menu_names]
+    settings_menu.set_current_values(
+        camera=0,
+        gain=1.0,
+        exposure=16667,
+        max_frames=args.max_frames,
+        stack_mode=False,
+        info_display=True,
+        size_label="N/A",
+        stop_ratio_percent=10,
+        stop_threshold=255,
+    )
+
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                print("フレーム受信に失敗しました。")
+                break
+
+            frame, source_bit_depth = normalize_frame_to_uint8(frame)
+
+            live_stack.add_to_buffer(frame)
+
+            if stacking_enabled:
+                stacked_result = live_stack.process_stack()
+                if stacked_result is None:
+                    stacked_result = frame
+                save_frame = stacked_result.copy()
+                display_frame = stacked_result.copy()
+            else:
+                save_frame = cv2.convertScaleAbs(frame, alpha=1.5, beta=20)
+                display_frame = save_frame.copy()
+
+            if flip_h and flip_v:
+                save_frame = cv2.flip(save_frame, -1)
+                display_frame = cv2.flip(display_frame, -1)
+            elif flip_h:
+                save_frame = cv2.flip(save_frame, 1)
+                display_frame = cv2.flip(display_frame, 1)
+            elif flip_v:
+                save_frame = cv2.flip(save_frame, 0)
+                display_frame = cv2.flip(display_frame, 0)
+
+            preview_frame = fit_display_frame(display_frame, screen_size=screen_size, ratio=0.85, fallback_height=600)
+
+            if info_display:
+                h, w = frame.shape[:2]
+                mode_text = "Live Stack Mode" if stacking_enabled else "Live View Mode"
+                cv2.putText(preview_frame, mode_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                cv2.putText(preview_frame, f"Source: {source}  {w}x{h}  {source_bit_depth}bit", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                if stacking_enabled:
+                    cv2.putText(preview_frame, f"Frames: {live_stack.stack_count}", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    current_ratio = compute_white_ratio_uint8(save_frame, live_stack.brightness_threshold)
+                    cv2.putText(preview_frame, f"Now: {current_ratio * 100:.2f}% / Limit: {live_stack.overflow_ratio_threshold * 100:.2f}%", (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
+                preview_frame = draw_ccdf_overlay(
+                    preview_frame,
+                    save_frame,
+                    brightness_threshold=live_stack.brightness_threshold,
+                    stop_ratio=live_stack.overflow_ratio_threshold,
+                )
+
+            if settings_menu.menu_active:
+                preview_frame = settings_menu.draw_menu(preview_frame)
+
+            cv2.imshow("Live Stack", preview_frame)
+
+            key_raw = cv2.waitKeyEx(1)
+            key = key_raw & 0xFF
+
+            if settings_menu.handle_key(key_raw):
+                if settings_menu.apply_requested:
+                    values = settings_menu.get_current_values()
+                    if values["max_frames"] != live_stack.max_frames:
+                        live_stack.max_frames = values["max_frames"]
+                        print(f"Max Frames設定: {live_stack.max_frames}")
+                    if values["stack_mode"] != stacking_enabled:
+                        stacking_enabled = values["stack_mode"]
+                        if stacking_enabled:
+                            print("LiveStack 有効")
+                            live_stack.reset()
+                        else:
+                            print("LiveStack 無効")
+                    if values["info_display"] != info_display:
+                        info_display = values["info_display"]
+                        print(f"情報表示: {'ON' if info_display else 'OFF'}")
+
+                    live_stack.overflow_ratio_threshold = max(0.01, min(0.50, values["stop_ratio_percent"] / 100.0))
+                    live_stack.brightness_threshold = max(5, min(255, values["stop_threshold"]))
+                continue
+
+            if key == ord("q"):
+                break
+            elif key == ord("m"):
+                settings_menu.menu_active = not settings_menu.menu_active
+            elif key in [ord("s"), ord("j")]:
+                filename = f"live_stack_source_{int(time.time())}.jpg"
+                try:
+                    from PIL import Image
+                    import piexif
+
+                    pil_image = Image.fromarray(cv2.cvtColor(save_frame, cv2.COLOR_BGR2RGB))
+                    exif_dict = {
+                        "0th": {
+                            piexif.ImageIFD.DateTime: time.strftime("%Y:%m:%d %H:%M:%S"),
+                            piexif.ImageIFD.ImageDescription: f"Stack Count: {live_stack.stack_count}",
+                        }
+                    }
+                    exif_bytes = piexif.dump(exif_dict)
+                    pil_image.save(filename, "jpeg", exif=exif_bytes)
+                except Exception:
+                    cv2.imwrite(filename, save_frame)
+                print(f"JPEG保存: {filename}")
+            elif key == ord("p"):
+                filename = f"live_stack_source_{int(time.time())}.png"
+                try:
+                    from PIL import Image
+
+                    pil_image = Image.fromarray(cv2.cvtColor(save_frame, cv2.COLOR_BGR2RGB))
+                    pil_image.save(filename, "png")
+                except Exception:
+                    cv2.imwrite(filename, save_frame)
+                print(f"PNG保存: {filename}")
+            elif key == ord("f"):
+                metadata = {
+                    "STACKCNT": live_stack.stack_count,
+                    "MODE": "LiveStack" if stacking_enabled else "LiveView",
+                    "DATE": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                filename = f"live_stack_source_{int(time.time())}.fits"
+                save_fits(save_frame, filename, metadata)
+            elif key == ord("t"):
+                stacking_enabled = not stacking_enabled
+                for s in settings_menu.settings:
+                    if s["name"] == "Stack Mode":
+                        s["value"] = stacking_enabled
+                        break
+                if stacking_enabled:
+                    print("LiveStack 有効")
+                    live_stack.reset()
+                else:
+                    print("LiveStack 無効")
+            elif key == ord("r"):
+                if stacking_enabled:
+                    live_stack.reset()
+                    print("スタックリセット")
+            elif key == ord("i"):
+                info_display = not info_display
+                print(f"情報表示: {'ON' if info_display else 'OFF'}")
+            elif key == ord("h"):
+                flip_h = not flip_h
+                print(f"左右反転: {'ON' if flip_h else 'OFF'}")
+            elif key == ord("v"):
+                flip_v = not flip_v
+                print(f"上下反転: {'ON' if flip_v else 'OFF'}")
+    except KeyboardInterrupt:
+        print("\n終了中...")
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+        print("Live Stack終了")
+
 def main():
     parser = argparse.ArgumentParser(description="LiveStack機能付きカメラプレビュー")
     parser.add_argument("-n", "--max-frames", type=int, default=100,
                         help="最大スタックフレーム数 (デフォルト: 100)")
+    parser.add_argument("--source", type=str, default=None,
+                        help="映像ソース。例: 0 または tcp://192.168.1.17:8888")
     parser.add_argument("--flip-h", action="store_true",
                         help="左右反転して起動")
     parser.add_argument("--flip-v", action="store_true",
                         help="上下反転して起動")
     args = parser.parse_args()
+
+    parsed_source = parse_source_arg(args.source)
+    if parsed_source is not None:
+        run_stream_mode(parsed_source, args)
+        return
+
+    # source未指定時は従来のpicamera2経路を試す。利用不可ならWindows向けにUSBカメラ(0)へフォールバック。
+    try:
+        from camera_config import CameraConfig
+    except Exception as e:
+        print(f"picamera2経路を利用できません ({e})")
+        print("USBカメラ(0)へフォールバックします。必要に応じて --source で明示指定してください。")
+        run_stream_mode(0, args)
+        return
 
     print("Live Stack - LiveStack機能付きカメラプレビュー（カメラ切り替え機能付き）")
     print("操作:")
@@ -709,6 +1005,7 @@ def main():
         while True:
             # フレーム取得
             frame = picam2.capture_array()
+            frame, source_bit_depth = normalize_frame_to_uint8(frame)
             h, w = frame.shape[:2]
 
             # リングバッファにフレームを追加
@@ -751,12 +1048,14 @@ def main():
                 mode_text = "Live Stack Mode" if stacking_enabled else "Live View Mode"
                 cv2.putText(preview_frame, mode_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
 
-                camera_info = f"Cam{current_camera} Gain:{current_gain} Exp:{settings_menu.get_exposure_text(current_exposure)} Size:{w}x{h}"
+                camera_info = f"Cam{current_camera} Gain:{current_gain} Exp:{settings_menu.get_exposure_text(current_exposure)} Size:{w}x{h} {source_bit_depth}bit"
                 cv2.putText(preview_frame, camera_info, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
                 if stacking_enabled:
                     stack_info = f"Frames: {live_stack.stack_count}"
                     cv2.putText(preview_frame, stack_info, (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    current_ratio = compute_white_ratio_uint8(save_frame, live_stack.brightness_threshold)
+                    cv2.putText(preview_frame, f"Now: {current_ratio * 100:.2f}% / Limit: {live_stack.overflow_ratio_threshold * 100:.2f}%", (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
 
                 if dark_frame_set:
                     cv2.putText(preview_frame, "Dark Frame Set", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
@@ -777,10 +1076,11 @@ def main():
             cv2.imshow("Live Stack", preview_frame)
             
             # キー入力処理
-            key = cv2.waitKey(1) & 0xFF
+            key_raw = cv2.waitKeyEx(1)
+            key = key_raw & 0xFF
             
             # 設定メニューのキー処理（優先）
-            if settings_menu.handle_key(key):
+            if settings_menu.handle_key(key_raw):
                 if not settings_menu.apply_requested:
                     continue
 
@@ -904,7 +1204,7 @@ def main():
 
                 # スタック停止条件（比率・しきい値）を適用
                 new_overflow_ratio_threshold = max(0.01, min(0.50, values["stop_ratio_percent"] / 100.0))
-                new_brightness_threshold = max(127, min(255, values["stop_threshold"]))
+                new_brightness_threshold = max(5, min(255, values["stop_threshold"]))
                 if (
                     abs(new_overflow_ratio_threshold - live_stack.overflow_ratio_threshold) > 1e-9
                     or new_brightness_threshold != live_stack.brightness_threshold
@@ -1081,23 +1381,34 @@ def main():
             elif key == ord("j"):
                 # JPEG保存
                 filename = f"live_stack_cam{current_camera}_{int(time.time())}.jpg"
-                pil_image = Image.fromarray(cv2.cvtColor(save_frame, cv2.COLOR_BGR2RGB))
-                exif_dict = {
-                    "0th": {
-                        piexif.ImageIFD.DateTime: time.strftime("%Y:%m:%d %H:%M:%S"),
-                        piexif.ImageIFD.ExposureTime: (current_exposure, 1000000),
-                        piexif.ImageIFD.ImageDescription: f"Stack Count: {live_stack.stack_count}"
+                try:
+                    from PIL import Image
+                    import piexif
+
+                    pil_image = Image.fromarray(cv2.cvtColor(save_frame, cv2.COLOR_BGR2RGB))
+                    exif_dict = {
+                        "0th": {
+                            piexif.ImageIFD.DateTime: time.strftime("%Y:%m:%d %H:%M:%S"),
+                            piexif.ImageIFD.ExposureTime: (current_exposure, 1000000),
+                            piexif.ImageIFD.ImageDescription: f"Stack Count: {live_stack.stack_count}"
+                        }
                     }
-                }
-                exif_bytes = piexif.dump(exif_dict)
-                pil_image.save(filename, "jpeg", exif=exif_bytes)
+                    exif_bytes = piexif.dump(exif_dict)
+                    pil_image.save(filename, "jpeg", exif=exif_bytes)
+                except Exception:
+                    cv2.imwrite(filename, save_frame)
                 print(f"JPEGファイル保存: {filename}")
 
             elif key == ord("p"):
                 # PNG保存
                 filename = f"live_stack_cam{current_camera}_{int(time.time())}.png"
-                pil_image = Image.fromarray(cv2.cvtColor(save_frame, cv2.COLOR_BGR2RGB))
-                pil_image.save(filename, "png")
+                try:
+                    from PIL import Image
+
+                    pil_image = Image.fromarray(cv2.cvtColor(save_frame, cv2.COLOR_BGR2RGB))
+                    pil_image.save(filename, "png")
+                except Exception:
+                    cv2.imwrite(filename, save_frame)
                 print(f"PNGファイル保存: {filename}")
                 print(f"保存データ: Gain={current_gain}, Exposure={settings_menu.get_exposure_text(current_exposure)}, Stack Count={live_stack.stack_count}")
 

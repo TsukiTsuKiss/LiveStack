@@ -8,9 +8,9 @@
 """
 import sys
 import os
+import argparse
 sys.path.append(os.path.join(os.path.dirname(__file__), 'common'))
 
-from camera_config import CameraConfig
 from hist_overlay import draw_hist_ccdf_overlay
 import cv2
 import time
@@ -18,12 +18,99 @@ import time
 def create_camera_safely(camera_num):
     """カメラを安全に作成する（エラーハンドリング付き）"""
     try:
+        from camera_config import CameraConfig
         return CameraConfig.create_fast_camera(camera_num)
     except Exception as e:
         print(f"カメラ {camera_num} の作成に失敗: {e}")
         return None
 
+
+def open_capture(source):
+    """cv2.VideoCaptureを開く（ローカルカメラ時は低遅延化）"""
+    cap = cv2.VideoCapture(source)
+    if isinstance(source, int):
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    return cap
+
+
+def parse_source_arg(source_arg):
+    """source引数をint(カメラ番号)またはstr(URL)に変換"""
+    if source_arg is None:
+        return None
+    stripped = source_arg.strip()
+    if stripped.isdigit():
+        return int(stripped)
+    return stripped
+
+
+def run_stream_mode(source):
+    """リモート/URLソースでライブビュー表示"""
+    print(f"Live View - Source: {source}")
+    print("操作: [q]終了 [s]保存")
+
+    cap = open_capture(source)
+    if not cap.isOpened():
+        print(f"ソースを開けませんでした: {source}")
+        return
+
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                print("フレーム受信に失敗しました。")
+                break
+
+            frame_bgr = cv2.convertScaleAbs(frame, alpha=1.2, beta=10)
+            h, w = frame.shape[:2]
+
+            cv2.putText(
+                frame_bgr,
+                f"Source {source} Size:{w}x{h}",
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 255, 0),
+                2,
+            )
+
+            frame_bgr = draw_hist_ccdf_overlay(
+                frame_bgr,
+                frame_bgr,
+                brightness_threshold=255,
+                stop_ratio=0.10,
+            )
+
+            cv2.imshow("Live View", frame_bgr)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                break
+            elif key == ord("s"):
+                filename = f"live_view_source_{int(time.time())}.jpg"
+                cv2.imwrite(filename, frame_bgr)
+                print(f"画像保存: {filename}")
+    except KeyboardInterrupt:
+        print("\n終了中...")
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+        print("Live View終了")
+
 def main():
+    parser = argparse.ArgumentParser(description="Live View")
+    parser.add_argument(
+        "--source",
+        type=str,
+        default=None,
+        help="映像ソース。例: 0 または tcp://192.168.1.17:8888",
+    )
+    args = parser.parse_args()
+
+    parsed_source = parse_source_arg(args.source)
+    if parsed_source is not None:
+        run_stream_mode(parsed_source)
+        return
+
     print("Live View - シンプルなカメラプレビュー（カメラ切り替え機能付き）")
     print("操作: [q]終了 [s]保存 [c]カメラ切り替え [0-1]カメラ番号直接指定")
     
