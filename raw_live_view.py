@@ -12,13 +12,15 @@ rpicam-raw TCP生ストリーム専用ライブビュー
 
 操作:
     [q] 終了
-    [s] PNG保存 (WB/表示補正前のデベイヤ後8bit)
+    [s] PNG保存 (WB適用後。ストレッチON時は表示と同じトーン)
     [r] NPY保存 (16bit RAW展開後)
     [n] 次のフォーマット候補に切替
     [+/-] skip ±1行
     [a] 自動ストレッチ ON/OFF
     [b] Bayerパターン切替
     [h] ヒストグラム ON/OFF
+    [w] 白点クリックWB ON/OFF
+    [W] WBリセット (B/G/R=1.0)
 """
 
 import argparse
@@ -37,6 +39,8 @@ from hist_overlay import draw_hist_ccdf_overlay
 
 DISPLAY_MAX_W = 1920
 DISPLAY_MAX_H = 1080
+PREVIEW_WINDOW_NAME = "RAW Live View"
+WB_WINDOW_NAME = "RAW WB"
 
 
 def fit_to_display(img, max_w=DISPLAY_MAX_W, max_h=DISPLAY_MAX_H):
@@ -56,6 +60,42 @@ def draw_info_lines(img, lines, font_scale=0.60, color=(0, 255, 0), thickness=2)
         y = 26 + i * 24
         cv2.putText(img, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
     return img
+
+
+def clamp(value, low, high):
+    return max(low, min(high, value))
+
+
+def apply_white_balance(bgr8, gains):
+    """BGR画像にチャンネルごとのゲインを適用する。RAWデータ自体は変更しない。"""
+    f = bgr8.astype(np.float32)
+    f[:, :, 0] *= gains[0]  # B
+    f[:, :, 1] *= gains[1]  # G
+    f[:, :, 2] *= gains[2]  # R
+    return np.clip(f, 0, 255).astype(np.uint8)
+
+
+def compute_wb_gains_from_patch(bgr8, cx, cy, radius=12):
+    """クリック周辺パッチから G 基準の WB ゲインを計算する。"""
+    h, w = bgr8.shape[:2]
+    x0 = clamp(cx - radius, 0, w - 1)
+    x1 = clamp(cx + radius + 1, 1, w)
+    y0 = clamp(cy - radius, 0, h - 1)
+    y1 = clamp(cy + radius + 1, 1, h)
+    patch = bgr8[y0:y1, x0:x1]
+    if patch.size == 0:
+        return None
+
+    means = patch.reshape(-1, 3).mean(axis=0).astype(np.float64)
+    b_mean, g_mean, r_mean = float(means[0]), float(means[1]), float(means[2])
+    eps = 1e-6
+    if g_mean <= eps:
+        return None
+
+    b_gain = clamp(g_mean / max(b_mean, eps), 0.10, 4.00)
+    g_gain = 1.00
+    r_gain = clamp(g_mean / max(r_mean, eps), 0.10, 4.00)
+    return [b_gain, g_gain, r_gain]
 
 
 def _align32(n):
@@ -275,7 +315,63 @@ def run_raw_live_view(args):
         bayer_idx = bayer_keys.index(args.bayer)
         bayer_code = BAYER_MAP[bayer_keys[bayer_idx]]
 
-        print("\n操作: [q]終了  [s]PNG保存  [r]NPY保存  [n]次候補フォーマット  [+/-]skip±1行  [a]ストレッチ切替  [b]Bayer切替  [h]ヒストグラム切替")
+        wb_gains = [1.0, 1.0, 1.0]
+        click_wb_mode = False
+        syncing_wb_trackbar = {"active": False}
+        mouse_ctx = {
+            "base_image": None,
+            "disp_shape": (1, 1),
+            "pending_msg": None,
+        }
+
+        cv2.namedWindow(PREVIEW_WINDOW_NAME, cv2.WINDOW_NORMAL)
+        cv2.namedWindow(WB_WINDOW_NAME, cv2.WINDOW_NORMAL)
+
+        def slider_to_gain(v):
+            return clamp(v / 100.0, 0.10, 4.00)
+
+        def gain_to_slider(g):
+            return int(round(clamp(g, 0.10, 4.00) * 100.0))
+
+        def sync_wb_trackbars():
+            syncing_wb_trackbar["active"] = True
+            cv2.setTrackbarPos("B x100", WB_WINDOW_NAME, gain_to_slider(wb_gains[0]))
+            cv2.setTrackbarPos("G x100", WB_WINDOW_NAME, gain_to_slider(wb_gains[1]))
+            cv2.setTrackbarPos("R x100", WB_WINDOW_NAME, gain_to_slider(wb_gains[2]))
+            syncing_wb_trackbar["active"] = False
+
+        cv2.createTrackbar("B x100", WB_WINDOW_NAME, 100, 400, lambda _v: None)
+        cv2.createTrackbar("G x100", WB_WINDOW_NAME, 100, 400, lambda _v: None)
+        cv2.createTrackbar("R x100", WB_WINDOW_NAME, 100, 400, lambda _v: None)
+        sync_wb_trackbars()
+
+        def on_mouse(event, x, y, _flags, _userdata):
+            if event != cv2.EVENT_LBUTTONDOWN:
+                return
+            if not click_wb_mode:
+                return
+            base = mouse_ctx["base_image"]
+            if base is None:
+                return
+
+            disp_h, disp_w = mouse_ctx["disp_shape"]
+            src_h, src_w = base.shape[:2]
+            sx = clamp(int(x * src_w / max(1, disp_w)), 0, src_w - 1)
+            sy = clamp(int(y * src_h / max(1, disp_h)), 0, src_h - 1)
+
+            gains = compute_wb_gains_from_patch(base, sx, sy, radius=12)
+            if gains is None:
+                return
+
+            wb_gains[0], wb_gains[1], wb_gains[2] = gains
+            sync_wb_trackbars()
+            mouse_ctx["pending_msg"] = (
+                f"[wb] click ({sx},{sy}) -> B={wb_gains[0]:.2f} G={wb_gains[1]:.2f} R={wb_gains[2]:.2f}"
+            )
+
+        cv2.setMouseCallback(PREVIEW_WINDOW_NAME, on_mouse)
+
+        print("\n操作: [q]終了  [s]PNG保存  [r]NPY保存  [n]次候補フォーマット  [+/-]skip±1行  [a]ストレッチ切替  [b]Bayer切替  [h]ヒストグラム切替  [w]白点WB  [W]WBリセット")
 
         frame_count = 0
         last_raw16 = None
@@ -296,8 +392,17 @@ def run_raw_live_view(args):
                     bgr_disp = bgr
                     s_lo, s_hi = 0.0, float((1 << fmt["bits"]) - 1)
 
+                if not syncing_wb_trackbar["active"]:
+                    wb_gains[0] = slider_to_gain(max(10, cv2.getTrackbarPos("B x100", WB_WINDOW_NAME)))
+                    wb_gains[1] = slider_to_gain(max(10, cv2.getTrackbarPos("G x100", WB_WINDOW_NAME)))
+                    wb_gains[2] = slider_to_gain(max(10, cv2.getTrackbarPos("R x100", WB_WINDOW_NAME)))
+
+                # RAWそのものには触らず、デベイヤ後画像にのみWBを適用
+                bgr = apply_white_balance(bgr, wb_gains)
+                bgr_disp = apply_white_balance(bgr_disp, wb_gains)
+
                 last_raw16 = raw16
-                last_bgr = bgr
+                last_bgr = bgr_disp
                 frame_count += 1
             except Exception as e:
                 print(f"[decode error] {e}")
@@ -312,6 +417,7 @@ def run_raw_live_view(args):
             lines = [
                 f"{args.source}  {src_w}x{src_h}  frame#{frame_count}",
                 f"{fmt['name'].strip()} | Bayer:{bayer_name} | {stretch_label}",
+                f"WB B:{wb_gains[0]:.2f} G:{wb_gains[1]:.2f} R:{wb_gains[2]:.2f} | click:{'ON' if click_wb_mode else 'OFF'}",
             ]
             if last_raw16 is not None:
                 vmin = int(last_raw16.min())
@@ -320,8 +426,15 @@ def run_raw_live_view(args):
                 lines.append(f"min={vmin}  max={vmax}  mean={vmean:.1f}  (max={(1 << fmt['bits']) - 1})")
                 if auto_stretch:
                     lines.append(f"stretch[{s_lo:.0f} - {s_hi:.0f}]")
-                print(f"[frame#{frame_count}] {'  '.join(lines[2:])}")
+                print(f"[frame#{frame_count}] {'  '.join(lines[3:])}")
             draw_info_lines(disp, lines)
+
+            # クリックWB用に、オーバーレイ前の元表示画像を保持
+            mouse_ctx["base_image"] = bgr_disp
+            mouse_ctx["disp_shape"] = disp.shape[:2]
+            if mouse_ctx["pending_msg"]:
+                print(mouse_ctx["pending_msg"])
+                mouse_ctx["pending_msg"] = None
 
             if show_hist:
                 disp = draw_hist_ccdf_overlay(
@@ -331,7 +444,7 @@ def run_raw_live_view(args):
                     stop_ratio=0.10,
                 )
 
-            cv2.imshow("RAW Live View", disp)
+            cv2.imshow(PREVIEW_WINDOW_NAME, disp)
             key = cv2.waitKey(1) & 0xFF
 
             if key == ord("q"):
@@ -350,6 +463,13 @@ def run_raw_live_view(args):
             elif key == ord("h"):
                 show_hist = not show_hist
                 print(f"[hist] ヒストグラム: {'ON' if show_hist else 'OFF'}")
+            elif key == ord("w"):
+                click_wb_mode = not click_wb_mode
+                print(f"[wb] 白点クリックWB: {'ON' if click_wb_mode else 'OFF'}")
+            elif key == ord("W"):
+                wb_gains[0], wb_gains[1], wb_gains[2] = 1.0, 1.0, 1.0
+                sync_wb_trackbars()
+                print("[wb] reset -> B=1.00 G=1.00 R=1.00")
             elif key == ord("b"):
                 bayer_idx = (bayer_idx + 1) % len(bayer_keys)
                 bayer_code = BAYER_MAP[bayer_keys[bayer_idx]]
@@ -361,7 +481,9 @@ def run_raw_live_view(args):
                             bgr_disp, s_lo, s_hi = raw16_to_bgr8_stretched(last_raw16, bayer_code)
                         else:
                             bgr_disp = bgr
-                        last_bgr = bgr
+                        bgr = apply_white_balance(bgr, wb_gains)
+                        bgr_disp = apply_white_balance(bgr_disp, wb_gains)
+                        last_bgr = bgr_disp
                     except Exception:
                         pass
             elif key == ord("n"):

@@ -42,6 +42,13 @@ camera-live/
 ### 2. RAW Live View (`raw_live_view.py`)
 `rpicam-raw` の生TCPストリームを受信して表示するRAW専用アプリ。
 
+**WB（ホワイトバランス）機能:**
+- RAWデータ自体は変更せず、デベイヤ後画像にのみWBゲインを適用
+- 白点クリックWB: `[w]` でクリックモードON/OFF、白い部分をクリックして自動補正
+- 手動WB: `RAW WB` ウィンドウの B/G/R スライダー（0.10〜4.00）
+- `[W]` でWBリセット（B/G/R = 1.00）
+- `[s]` 保存はWB適用後画像を保存（ストレッチON時は表示トーン相当）
+
 **RAW Bayerモードの使い方（IMX678）:**
 ```bash
 # 送信側 (Raspberry Pi Zero 2W) - 動作確認済み最小構成
@@ -83,13 +90,15 @@ python raw_live_view.py --source tcp://192.168.1.17:8888 \
 
 **操作:**
 - `q`: 終了
-- `s`: PNG保存
+- `s`: PNG保存（WB適用後）
 - `r`: 16bit RAWデータをNPY形式で保存
 - `a`: 自動ストレッチ ON/OFF
 - `b`: Bayerパターン切り替え（RGGB→BGGR→GRBG→GBRG）
 - `n`: 次のフォーマット候補に切り替え
 - `+` / `-`: skip ±1ストライド
 - `h`: ヒストグラム+CCDFオーバーレイ ON/OFF
+- `w`: 白点クリックWB ON/OFF
+- `W`: WBリセット（B/G/R=1.00）
 
 ### 3. Live Stack (`live_stack.py`)
 リアルタイムでフレームを加算スタックし、ノイズ軽減と画質向上を実現するプレビューアプリケーション（カメラ切り替え機能付き）。
