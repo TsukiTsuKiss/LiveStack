@@ -7,6 +7,7 @@ Raspberry Pi Camera2用のリアルタイムプレビューアプリケーショ
 ```
 camera-live/
 ├── live_view.py      # シンプルなライブプレビュー
+├── raw_live_view.py  # rpicam-raw TCP受信専用プレビュー
 ├── live_stack.py     # LiveStack機能付きプレビュー
 ├── common/
 │   └── camera_config.py  # 共通カメラ設定
@@ -16,23 +17,81 @@ camera-live/
 ## アプリケーション
 
 ### 1. Live View (`live_view.py`)
-シンプルなリアルタイムカメラプレビュー（カメラ切り替え機能付き）
+シンプルなリアルタイムカメラプレビュー。ローカルカメラとURLストリームの2モードに対応。
 
 **特徴:**
 - 最小タイムラグ
-- 高速動作
-- 基本的な操作のみ
-- カメラ0と1の切り替え対応
-- 右上にヒストグラム+CCDFオーバーレイを常時表示（共通部品）
+- 2モード統一表示（ソース・解像度・フレーム数・統計）
+- 最大1920×1080に自動リサイズ（アスペクト比維持）
+- 右上にヒストグラム+CCDFオーバーレイ（`[h]`でON/OFF）
+- BGR統計表示（min / max / mean / チャンネル別平均）
+
+**モード:**
+- **ローカルカメラモード**: `--source` 未指定時。`picamera2` 経由、カメラ0/1切り替え対応
+- **URLストリームモード**: `--source 0` や `--source tcp://...` 指定時。`cv2.VideoCapture` 経由
+
+**共通操作（全モード）:**
+- `q`: 終了
+- `s`: 画像保存（フルサイズ）
+- `h`: ヒストグラム+CCDFオーバーレイ ON/OFF
+
+**ローカルカメラ追加操作:**
+- `c`: カメラ切り替え（0 ↔ 1）
+- `0` / `1`: カメラ番号直接指定
+
+### 2. RAW Live View (`raw_live_view.py`)
+`rpicam-raw` の生TCPストリームを受信して表示するRAW専用アプリ。
+
+**RAW Bayerモードの使い方（IMX678）:**
+```bash
+# 送信側 (Raspberry Pi Zero 2W) - 動作確認済み最小構成
+rpicam-raw --width 3840 --height 2160 --framerate 0.3 \
+           --shutter 600000 --gain 1 -t 0 --listen -o tcp://0.0.0.0:8888
+
+# 受信側 (Windows PC) - IMX678確定設定
+python raw_live_view.py --source tcp://192.168.1.17:8888 \
+    --bits 12 --bayer BGGR --raw-width 3856 --raw-height 2180 --stride 5792
+```
+
+> **注意**: `--shutter` は 600000µs (0.6秒) 以上を推奨。  
+> それより短いとlibcameraがセンサーモードを切り替え、strideが変わって  
+> デコードが破綻する場合があります（IMX678 CamHelper 未インストール時）。  
+> 暗い被写体では `--gain` を上げるより `--shutter` を長くする方が高画質です。
+
+**シャッター・ゲインの目安:**
+
+| シャッター | ゲイン | 用途 |
+|---|---|---|
+| 600000 (0.6s) | 1 | 明るい室内・動作確認 |
+| 1000000 (1s) | 1〜4 | 通常室内 |
+| 3000000 (3s) | 1〜8 | 薄暗い室内・天体 |
+| 10000000 (10s) | 1〜8 | 天体撮影 |
+
+**RAWモード引数:**
+
+| 引数 | デフォルト | 説明 |
+|---|---|---|
+| `--width` | 3840 | 表示/クロップ幅 |
+| `--height` | 2160 | 表示/クロップ高さ |
+| `--raw-width` | =width | 実センサーRAW幅（IMX678=3856） |
+| `--raw-height` | =height | 実センサーRAW高さ（IMX678=2180） |
+| `--stride` | 自動 | 1行あたりバイト数（IMX678=5792） |
+| `--bits` | 自動 | ビット深度 8/10/12/16 |
+| `--bayer` | BGGR | Bayerパターン（IMX678確認済み） |
+| `--timeout` | 120 | 受信タイムアウト秒 |
+| `--no-stretch` | - | 自動ストレッチを無効化 |
 
 **操作:**
 - `q`: 終了
-- `s`: 画像保存  
-- `c`: カメラ切り替え（0 ↔ 1）
-- `0`: カメラ0に直接切り替え
-- `1`: カメラ1に直接切り替え
+- `s`: PNG保存
+- `r`: 16bit RAWデータをNPY形式で保存
+- `a`: 自動ストレッチ ON/OFF
+- `b`: Bayerパターン切り替え（RGGB→BGGR→GRBG→GBRG）
+- `n`: 次のフォーマット候補に切り替え
+- `+` / `-`: skip ±1ストライド
+- `h`: ヒストグラム+CCDFオーバーレイ ON/OFF
 
-### 2. Live Stack (`live_stack.py`)
+### 3. Live Stack (`live_stack.py`)
 リアルタイムでフレームを加算スタックし、ノイズ軽減と画質向上を実現するプレビューアプリケーション（カメラ切り替え機能付き）。
 
 #### 主な機能
@@ -103,7 +162,7 @@ camera-live/
 - 動作不良時は非スタッキングモードに戻す機能を実装。
 - 最新の改善により、安定した動作が確認されています。
 
-### 3. 保存機能
+### 4. 保存機能
 Live Stackモードでは以下の形式で画像を保存できます。
 
 **保存形式:**
@@ -130,6 +189,9 @@ source ../preview/.venv/bin/activate
 
 # シンプルプレビュー
 python3 live_view.py
+
+# RAW専用プレビュー
+python3 raw_live_view.py --source tcp://192.168.1.17:8888 --bits 12 --bayer BGGR --raw-width 3856 --raw-height 2180 --stride 5792
 
 # LiveStack機能付き
 python3 live_stack.py
@@ -159,6 +221,9 @@ python3 live_stack.py --source 0
 # リモートTCPストリーム
 python3 live_view.py --source tcp://192.168.1.17:8888
 python3 live_stack.py --source tcp://192.168.1.17:8888
+
+# RAW TCPストリーム (rpicam-raw)
+python3 raw_live_view.py --source tcp://192.168.1.17:8888 --bits 12 --bayer BGGR --raw-width 3856 --raw-height 2180 --stride 5792
 ```
 
 ### 送信側（Raspberry Pi: rpicam-vid の例）
@@ -177,6 +242,13 @@ rpicam-vid -t 0 -n --width 1920 --height 1080 --framerate 5 --codec h264 --liste
 補足:
 - まずは低解像度（640x400）で疎通確認し、その後1080pへ上げると安定します。
 - 送信例は上記3本が最小セットです。必要に応じて `--shutter` / `--gain` を追加調整してください。
+
+### 送信側（Raspberry Pi: rpicam-raw の例）
+
+```bash
+rpicam-raw --width 3840 --height 2160 --framerate 0.3 \
+   --shutter 600000 --gain 1 -t 0 --listen -o tcp://0.0.0.0:8888
+```
 
 ## 設定
 
