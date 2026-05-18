@@ -21,6 +21,8 @@ rpicam-raw TCP生ストリーム専用ライブビュー
     [h] ヒストグラム ON/OFF
     [w] 白点クリックWB ON/OFF
     [W] WBリセット (B/G/R=1.0)
+    [g] ガンマ調整モード ON/OFF（左右キーで変更）
+    [G] ガンマリセット (0.80)
 """
 
 import argparse
@@ -73,6 +75,14 @@ def apply_white_balance(bgr8, gains):
     f[:, :, 1] *= gains[1]  # G
     f[:, :, 2] *= gains[2]  # R
     return np.clip(f, 0, 255).astype(np.uint8)
+
+
+def apply_gamma_correction(bgr8, gamma):
+    """BGR画像に表示ガンマ補正を適用する。"""
+    gamma = clamp(float(gamma), 0.10, 4.00)
+    inv_gamma = 1.0 / gamma
+    table = np.array([((i / 255.0) ** inv_gamma) * 255.0 for i in range(256)], dtype=np.uint8)
+    return cv2.LUT(bgr8, table)
 
 
 def compute_wb_gains_from_patch(bgr8, cx, cy, radius=12):
@@ -191,7 +201,7 @@ def raw16_to_bgr8(raw16, bits, bayer_code):
     return cv2.cvtColor(bayer8, bayer_code)
 
 
-def raw16_to_bgr8_stretched(raw16, bayer_code, percentile=99.5, gamma=2.2):
+def raw16_to_bgr8_stretched(raw16, bayer_code, percentile=99.5, gamma=1.0):
     lo = float(np.percentile(raw16, 0.5))
     hi = float(np.percentile(raw16, percentile))
     if hi <= lo:
@@ -316,6 +326,8 @@ def run_raw_live_view(args):
         bayer_code = BAYER_MAP[bayer_keys[bayer_idx]]
 
         wb_gains = [1.0, 1.0, 1.0]
+        gamma_value = 0.80
+        gamma_adjust_mode = False
         click_wb_mode = False
         syncing_wb_trackbar = {"active": False}
         mouse_ctx = {
@@ -333,16 +345,24 @@ def run_raw_live_view(args):
         def gain_to_slider(g):
             return int(round(clamp(g, 0.10, 4.00) * 100.0))
 
+        def slider_to_gamma(v):
+            return clamp(v / 100.0, 0.10, 4.00)
+
+        def gamma_to_slider(g):
+            return int(round(clamp(g, 0.10, 4.00) * 100.0))
+
         def sync_wb_trackbars():
             syncing_wb_trackbar["active"] = True
             cv2.setTrackbarPos("B x100", WB_WINDOW_NAME, gain_to_slider(wb_gains[0]))
             cv2.setTrackbarPos("G x100", WB_WINDOW_NAME, gain_to_slider(wb_gains[1]))
             cv2.setTrackbarPos("R x100", WB_WINDOW_NAME, gain_to_slider(wb_gains[2]))
+            cv2.setTrackbarPos("Gamma x100", WB_WINDOW_NAME, gamma_to_slider(gamma_value))
             syncing_wb_trackbar["active"] = False
 
         cv2.createTrackbar("B x100", WB_WINDOW_NAME, 100, 400, lambda _v: None)
         cv2.createTrackbar("G x100", WB_WINDOW_NAME, 100, 400, lambda _v: None)
         cv2.createTrackbar("R x100", WB_WINDOW_NAME, 100, 400, lambda _v: None)
+        cv2.createTrackbar("Gamma x100", WB_WINDOW_NAME, 80, 400, lambda _v: None)
         sync_wb_trackbars()
 
         def on_mouse(event, x, y, _flags, _userdata):
@@ -371,7 +391,7 @@ def run_raw_live_view(args):
 
         cv2.setMouseCallback(PREVIEW_WINDOW_NAME, on_mouse)
 
-        print("\n操作: [q]終了  [s]PNG保存  [r]NPY保存  [n]次候補フォーマット  [+/-]skip±1行  [a]ストレッチ切替  [b]Bayer切替  [h]ヒストグラム切替  [w]白点WB  [W]WBリセット")
+        print("\n操作: [q]終了  [s]PNG保存  [r]NPY保存  [n]次候補フォーマット  [+/-]skip±1行  [a]ストレッチ切替  [b]Bayer切替  [h]ヒストグラム切替  [w]白点WB  [W]WBリセット  [g]ガンマ調整モード  [G]ガンマリセット")
 
         frame_count = 0
         last_raw16 = None
@@ -396,10 +416,13 @@ def run_raw_live_view(args):
                     wb_gains[0] = slider_to_gain(max(10, cv2.getTrackbarPos("B x100", WB_WINDOW_NAME)))
                     wb_gains[1] = slider_to_gain(max(10, cv2.getTrackbarPos("G x100", WB_WINDOW_NAME)))
                     wb_gains[2] = slider_to_gain(max(10, cv2.getTrackbarPos("R x100", WB_WINDOW_NAME)))
+                    gamma_value = slider_to_gamma(max(10, cv2.getTrackbarPos("Gamma x100", WB_WINDOW_NAME)))
 
                 # RAWそのものには触らず、デベイヤ後画像にのみWBを適用
                 bgr = apply_white_balance(bgr, wb_gains)
                 bgr_disp = apply_white_balance(bgr_disp, wb_gains)
+                bgr = apply_gamma_correction(bgr, gamma_value)
+                bgr_disp = apply_gamma_correction(bgr_disp, gamma_value)
 
                 last_raw16 = raw16
                 last_bgr = bgr_disp
@@ -417,7 +440,7 @@ def run_raw_live_view(args):
             lines = [
                 f"{args.source}  {src_w}x{src_h}  frame#{frame_count}",
                 f"{fmt['name'].strip()} | Bayer:{bayer_name} | {stretch_label}",
-                f"WB B:{wb_gains[0]:.2f} G:{wb_gains[1]:.2f} R:{wb_gains[2]:.2f} | click:{'ON' if click_wb_mode else 'OFF'}",
+                f"WB B:{wb_gains[0]:.2f} G:{wb_gains[1]:.2f} R:{wb_gains[2]:.2f} | Gamma:{gamma_value:.2f} ({'KEY' if gamma_adjust_mode else 'GUI'}) | click:{'ON' if click_wb_mode else 'OFF'}",
             ]
             if last_raw16 is not None:
                 vmin = int(last_raw16.min())
@@ -445,7 +468,8 @@ def run_raw_live_view(args):
                 )
 
             cv2.imshow(PREVIEW_WINDOW_NAME, disp)
-            key = cv2.waitKey(1) & 0xFF
+            key_code = cv2.waitKeyEx(1)
+            key = key_code & 0xFF
 
             if key == ord("q"):
                 break
@@ -470,6 +494,13 @@ def run_raw_live_view(args):
                 wb_gains[0], wb_gains[1], wb_gains[2] = 1.0, 1.0, 1.0
                 sync_wb_trackbars()
                 print("[wb] reset -> B=1.00 G=1.00 R=1.00")
+            elif key == ord("g"):
+                gamma_adjust_mode = not gamma_adjust_mode
+                print(f"[gamma] 調整モード: {'ON' if gamma_adjust_mode else 'OFF'} (左右キーで変更)")
+            elif key == ord("G"):
+                gamma_value = 0.80
+                sync_wb_trackbars()
+                print("[gamma] reset -> 0.80")
             elif key == ord("b"):
                 bayer_idx = (bayer_idx + 1) % len(bayer_keys)
                 bayer_code = BAYER_MAP[bayer_keys[bayer_idx]]
@@ -483,6 +514,8 @@ def run_raw_live_view(args):
                             bgr_disp = bgr
                         bgr = apply_white_balance(bgr, wb_gains)
                         bgr_disp = apply_white_balance(bgr_disp, wb_gains)
+                        bgr = apply_gamma_correction(bgr, gamma_value)
+                        bgr_disp = apply_gamma_correction(bgr_disp, gamma_value)
                         last_bgr = bgr_disp
                     except Exception:
                         pass
@@ -499,6 +532,17 @@ def run_raw_live_view(args):
                 skip = max(0, skip - fmt["stride"])
                 print(f"[skip] -{fmt['stride']} -> skip={skip}")
                 buf.clear()
+
+            if gamma_adjust_mode:
+                # OpenCVの矢印キーコード（Windows/Linux）
+                if key_code in (2424832, 81):  # Left
+                    gamma_value = clamp(gamma_value - 0.05, 0.10, 4.00)
+                    sync_wb_trackbars()
+                    print(f"[gamma] {gamma_value:.2f}")
+                elif key_code in (2555904, 83):  # Right
+                    gamma_value = clamp(gamma_value + 0.05, 0.10, 4.00)
+                    sync_wb_trackbars()
+                    print(f"[gamma] {gamma_value:.2f}")
 
             total_size = skip + fmt["frame_size"]
             sock.settimeout(args.timeout)
