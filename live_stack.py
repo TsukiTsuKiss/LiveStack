@@ -352,7 +352,11 @@ class LiveStack:
             valid_stack_count += 1
 
         self.stack_count = valid_stack_count  # 有効なスタック数を更新
-        return np.clip(display_frame, 0, 255).astype(np.uint8)
+
+        # 加算値をそのまま8bit化すると櫛形が強く出るため、
+        # 非整数スケール（sqrt(N)）で明るさを確保しつつ量子化間隔を緩和する。
+        preview_scale = float(np.sqrt(max(1, valid_stack_count)))
+        return np.clip(display_frame / preview_scale, 0, 255).astype(np.uint8)
 
     def set_dark_frame(self, frame):
         """ダークフレームを加算平均して設定"""
@@ -776,7 +780,7 @@ def run_stream_mode(source, args):
                 save_frame = stacked_result.copy()
                 display_frame = stacked_result.copy()
             else:
-                save_frame = cv2.convertScaleAbs(frame, alpha=1.5, beta=20)
+                save_frame = frame.copy()
                 display_frame = save_frame.copy()
 
             if flip_h and flip_v:
@@ -1024,7 +1028,7 @@ def main():
                 display_frame = stacked_result.copy()
             else:
                 # 保存用フレーム（テキスト情報なし）
-                save_frame = cv2.convertScaleAbs(frame, alpha=1.5, beta=20)
+                save_frame = frame.copy()
                 
                 # 表示用フレーム
                 display_frame = save_frame.copy()
