@@ -39,21 +39,51 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "common"))
 from hist_overlay import draw_hist_ccdf_overlay
 
 
-DISPLAY_MAX_W = 1920
-DISPLAY_MAX_H = 1080
 PREVIEW_WINDOW_NAME = "RAW Live View"
 WB_WINDOW_NAME = "RAW WB"
 
 
-def fit_to_display(img, max_w=DISPLAY_MAX_W, max_h=DISPLAY_MAX_H):
-    """画像をウィンドウ上限サイズに収まるよう縮小する（アスペクト比維持）。"""
-    h, w = img.shape[:2]
-    scale = min(max_w / w, max_h / h, 1.0)
-    if scale >= 1.0:
-        return img
-    new_w = int(w * scale)
-    new_h = int(h * scale)
-    return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+def get_screen_size():
+    """画面サイズを取得（取得不可時はNone）"""
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        width = root.winfo_screenwidth()
+        height = root.winfo_screenheight()
+        root.destroy()
+        if width > 0 and height > 0:
+            return width, height
+    except Exception:
+        pass
+    if os.name == "nt":
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            width = int(user32.GetSystemMetrics(0))
+            height = int(user32.GetSystemMetrics(1))
+            if width > 0 and height > 0:
+                return width, height
+        except Exception:
+            pass
+    return None
+
+
+def fit_display_frame(frame, screen_size=None, ratio=0.85, fallback_height=600):
+    """表示フレームのみ画面サイズに収まるよう縮小（内部処理用フレームは変更しない）"""
+    h, w = frame.shape[:2]
+    if screen_size is not None:
+        max_w = int(screen_size[0] * ratio)
+        max_h = int(screen_size[1] * ratio)
+    else:
+        max_h = fallback_height
+        max_w = int((w / max(1, h)) * max_h)
+    if w <= max_w and h <= max_h:
+        return frame
+    scale = min(max_w / max(1, w), max_h / max(1, h))
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+    return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
 
 def draw_info_lines(img, lines, font_scale=0.60, color=(0, 255, 0), thickness=2):
@@ -329,6 +359,7 @@ def run_raw_live_view(args):
         gamma_value = 0.80
         gamma_adjust_mode = False
         click_wb_mode = False
+        screen_size = get_screen_size()
         syncing_wb_trackbar = {"active": False}
         mouse_ctx = {
             "base_image": None,
@@ -432,7 +463,7 @@ def run_raw_live_view(args):
                 bgr_disp = bgr = np.zeros((args.height // 4, args.width // 4, 3), dtype=np.uint8)
                 s_lo, s_hi = 0.0, 1.0
 
-            disp = fit_to_display(bgr_disp)
+            disp = fit_display_frame(bgr_disp, screen_size=screen_size)
             src_h, src_w = bgr_disp.shape[:2]
             stretch_label = "stretch" if auto_stretch else "raw"
             bayer_name = bayer_keys[bayer_idx]
