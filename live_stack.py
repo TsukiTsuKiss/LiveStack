@@ -11,45 +11,10 @@ import argparse
 sys.path.append(os.path.join(os.path.dirname(__file__), 'common'))
 
 from hist_overlay import draw_hist_ccdf_overlay
+from display_utils import clamp, draw_info_lines, fit_display_frame, get_screen_size
 import cv2
 import numpy as np
 import time
-
-
-def get_screen_size():
-    """画面サイズを取得（取得不可時はNone）"""
-    try:
-        import tkinter as tk
-        root = tk.Tk()
-        root.withdraw()
-        width = root.winfo_screenwidth()
-        height = root.winfo_screenheight()
-        root.destroy()
-        if width > 0 and height > 0:
-            return width, height
-    except Exception:
-        pass
-    return None
-
-
-def fit_display_frame(frame, screen_size=None, ratio=0.85, fallback_height=600):
-    """表示フレームのみ画面サイズに収まるよう縮小（内部処理用フレームは変更しない）"""
-    h, w = frame.shape[:2]
-
-    if screen_size is not None:
-        max_w = int(screen_size[0] * ratio)
-        max_h = int(screen_size[1] * ratio)
-    else:
-        max_h = fallback_height
-        max_w = int((w / max(1, h)) * max_h)
-
-    if w <= max_w and h <= max_h:
-        return frame
-
-    scale = min(max_w / max(1, w), max_h / max(1, h))
-    new_w = max(1, int(w * scale))
-    new_h = max(1, int(h * scale))
-    return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
 
 def draw_ccdf_overlay(target_frame, source_frame, brightness_threshold=255, stop_ratio=0.10):
