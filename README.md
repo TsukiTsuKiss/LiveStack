@@ -2,13 +2,46 @@
 
 Raspberry Pi Camera2用のリアルタイムプレビューアプリケーション
 
+## 目的
+
+このリポジトリには、次の2つの目的がある。
+
+1. Raspberry Pi Camera2向けに、ライブ表示・スタック・画像保存・RAW処理を含む実用的な撮像アプリ群をPythonで構築する。
+2. AIを活用したプログラム作成プロセスを体験し、設計・実装・検証の進め方を実践的に学ぶ。
+
+背景として、スタック処理・画像処理・SER出力はCで個別実装した資産があり、Raspberry Piのカメラシステム変更のタイミングでPython実装へ展開している。
+
+## スクリプト機能比較
+
+| 機能 | live_view.py | live_stack.py | raw_live_view.py | raw_live_stack.py |
+|---|:---:|:---:|:---:|:---:|
+| **入力ソース** | picamera2 / URL | picamera2 / URL | TCP RAWストリーム | TCP RAWストリーム |
+| **RAW（Bayer）処理** | × | × | 〇 | 〇 |
+| **加算スタック** | × | 〇 | × | 〇 |
+| **ダークフレーム減算** | × | 〇 | × | 〇 |
+| **WBゲイン調整** | × | × | 〇 | 〇 |
+| **ガンマ補正** | × | × | 〇 | 〇 |
+| **自動ストレッチ** | × | × | 〇 | 〇 |
+| **ヒストグラム+CCDF** | 〇 | 〇 | 〇 | 〇 |
+| **PNG保存** | 〇 | 〇 | 〇 | 〇 |
+| **JPEG保存** | × | 〇 | × | × |
+| **FITS保存** | × | 〇 | × | 〇 |
+| **NPY(RAW16)保存** | × | × | 〇 | 〇 |
+| **SER録画** | × | × | × | 〇 |
+| **カメラ切り替え** | 〇 | 〇 | × | × |
+| **設定メニュー** | × | 〇 | × | 〇 |
+
+> 詳細は各スクリプトのセクションを参照。
+
+---
+
 ## ファイル構成
 
 ```
 camera-live/
 ├── live_view.py          # シンプルなライブプレビュー
 ├── raw_live_view.py      # rpicam-raw TCP受信専用プレビュー
-├── live_stack.py         # LiveStack機能付きプレビュー（カメラ直結）
+├── live_stack.py         # LiveStack機能付きプレビュー（カメラ直結/URL対応）
 ├── raw_live_stack.py     # rpicam-raw TCP受信 + LiveStack（RAW専用）
 ├── common/
 │   ├── camera_config.py  # 共通カメラ設定

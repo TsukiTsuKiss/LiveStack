@@ -660,7 +660,7 @@ class SettingsMenu:
 # 保存ユーティリティ
 # ---------------------------------------------------------------------------
 
-def save_ser(frames, filename, bayer_key, bits, width, height):
+def save_ser(frames, filename, bayer_key, bits, width, height, lsb=False):
     """SER形式でraw16 Bayerフレームを保存（天体撮影用マルチフレームフォーマット）
 
     SER は外部ライブラリ不要のシンプルなバイナリフォーマット。
@@ -697,8 +697,9 @@ def save_ser(frames, filename, bayer_key, bits, width, height):
 
     with open(filename, "wb") as f:
         f.write(header)
+        shift = 0 if lsb else (16 - bits)  # LSB詰め or MSB詰め(上位詰め)
         for frame in frames:
-            f.write(frame.astype(np.uint16).tobytes())
+            f.write((frame.astype(np.float32) * (1 << shift)).clip(0, 65535).astype(np.uint16).tobytes())
 
     print(f"[save] SER: {filename}  frames={len(frames)}  {width}x{height} {bits}bit {bayer_key}")
 
@@ -957,12 +958,18 @@ def run_raw_live_stack(args):
             live_stack.add_to_buffer(raw16)
 
             # --- SER リアルタイム追記 ---
-            if _ser_recording and _ser_file is not None and raw16 is not None:
+            # スタックON: スタック加算値を書き込む / スタックOFF: 最新1フレームを書き込む
+            if _ser_recording and _ser_file is not None:
                 import datetime
-                frame_f32 = raw16.astype(np.float32)
-                if live_stack.dark_frame is not None:
-                    frame_f32 = np.clip(frame_f32 - live_stack.dark_frame, 0, None)
-                _ser_file.write(frame_f32.clip(0, 65535).astype(np.uint16).tobytes())
+                shift = 0 if args.ser_lsb else (16 - fmt["bits"])  # LSB詰め or MSB詰め(上位詰め)
+                if stack_enabled and live_stack.stacked_raw16 is not None:
+                    ser_f32 = live_stack.stacked_raw16.astype(np.float32)
+                elif raw16 is not None:
+                    ser_f32 = raw16.astype(np.float32)
+                else:
+                    ser_f32 = None
+                if ser_f32 is not None:
+                    _ser_file.write((ser_f32 * (1 << shift)).clip(0, 65535).astype(np.uint16).tobytes())
                 # 受信時刻を .NET DateTime.Ticks (100ns単位) で記録
                 now_utc = datetime.datetime.utcnow()
                 ticks = int((now_utc - datetime.datetime(1, 1, 1)).total_seconds() * 10_000_000)
@@ -1314,6 +1321,7 @@ def build_arg_parser():
     parser.add_argument("--timeout", type=int, default=120, help="受信タイムアウト秒 (デフォルト: 120)")
     parser.add_argument("--no-stretch", action="store_true", help="自動ストレッチを無効化 (デフォルト: ストレッチ有効)")
     parser.add_argument("--max-frames", type=int, default=100, help="LiveStack最大フレーム数 (デフォルト: 100)")
+    parser.add_argument("--ser-lsb", action="store_true", help="SER書き出しを下位詰め(LSB-aligned)にする (デフォルト: 上位詰めMSB-aligned)")
     return parser
 
 
