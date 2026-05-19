@@ -4,6 +4,9 @@
 *.png
 *.fits
 
+# 動画ファイル
+*.ser
+
 # キャッシュファイル
 __pycache__/
 *.pyc

@@ -142,7 +142,7 @@ def decode_to_raw16(frame_bytes, fmt, width, height):
     stride = fmt["stride"]
     if bits == 8:
         raw8 = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(height, stride)
-        return raw8[:, :width].astype(np.uint16) << 8
+        return raw8[:, :width].astype(np.uint16)  # 下位8bitに格納（10/12bitと統一）
     if bits == 10:
         return unpack_10bit_csi2p(frame_bytes, width, height, stride)
     if bits == 12:

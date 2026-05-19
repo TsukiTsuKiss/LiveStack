@@ -15,6 +15,7 @@ rpicam-raw TCP生ストリーム専用ライブスタック
     [m] 設定メニュー
     [i] 情報表示 ON/OFF
     [s] PNG保存
+    [S] SER保存 (バッファ全フレームをマルチフレームSER)
     [r] NPY保存 (16bit RAW展開後)
     [f] FITS保存
     [n] 次のフォーマット候補に切替
@@ -28,6 +29,8 @@ rpicam-raw TCP生ストリーム専用ライブスタック
     [W] WBリセット (B/G/R=1.0)
     [g] ガンマ調整モード ON/OFF（左右キーで変更）
     [G] ガンマリセット (0.80)
+    [d] ダークフレーム取得（レンズキャップして押す）
+    [D] ダークフレームクリア
 """
 
 import argparse
@@ -657,6 +660,49 @@ class SettingsMenu:
 # 保存ユーティリティ
 # ---------------------------------------------------------------------------
 
+def save_ser(frames, filename, bayer_key, bits, width, height):
+    """SER形式でraw16 Bayerフレームを保存（天体撮影用マルチフレームフォーマット）
+
+    SER は外部ライブラリ不要のシンプルなバイナリフォーマット。
+    AutoStakkert! / PIPP / Registax 等で直接読み込んで再スタック可能。
+    """
+    import struct
+    import datetime
+
+    # SER ColorID マッピング（SER Player互換: RGGB↔BGGR, GRBG↔GBRG を反転）
+    color_id_map = {"RGGB": 11, "GRBG": 10, "GBRG": 9, "BGGR": 8}
+    color_id = color_id_map.get(bayer_key, 0)  # 不明なら MONO(0)
+
+    # タイムスタンプ: .NET DateTime.Ticks (100ns 単位, 0001-01-01 起点)
+    now_utc = datetime.datetime.utcnow()
+    ticks = int((now_utc - datetime.datetime(1, 1, 1)).total_seconds() * 10_000_000)
+
+    # SER ヘッダー (178 bytes 固定)
+    header = (
+        b"LUCAM-RECORDER"            # 14 bytes: マジック
+        + struct.pack("<I", 0)       #  4 bytes: LuID (0 = 未使用)
+        + struct.pack("<I", color_id)#  4 bytes: ColorID
+        + struct.pack("<I", 0)       #  4 bytes: LittleEndian: 0=SER Player互換 (フラグ意味が逆のため)
+        + struct.pack("<I", width)   #  4 bytes: ImageWidth
+        + struct.pack("<I", height)  #  4 bytes: ImageHeight
+        + struct.pack("<I", 16)          #  4 bytes: PixelDepthPerPlane: 16bit (C実装に合わせ固定)
+        + struct.pack("<I", len(frames))  # 4 bytes: FrameCount
+        + b"LiveStack".ljust(40, b"\x00")[:40]   # 40 bytes: Observer
+        + b"rpicam-raw".ljust(40, b"\x00")[:40]  # 40 bytes: Instrument
+        + b"".ljust(40, b"\x00")     # 40 bytes: Telescope
+        + struct.pack("<q", ticks)   #  8 bytes: DateTime (local)
+        + struct.pack("<q", ticks)   #  8 bytes: DateTimeUTC
+    )
+    assert len(header) == 178, f"SER header size mismatch: {len(header)}"
+
+    with open(filename, "wb") as f:
+        f.write(header)
+        for frame in frames:
+            f.write(frame.astype(np.uint16).tobytes())
+
+    print(f"[save] SER: {filename}  frames={len(frames)}  {width}x{height} {bits}bit {bayer_key}")
+
+
 def save_fits(image, filename, metadata):
     """FITS形式でRGB画像を保存"""
     try:
@@ -837,10 +883,18 @@ def run_raw_live_stack(args):
         print("       [h]ヒストグラム切替  [t]LiveStack ON/OFF  [R]LiveStackリセット")
         print("       [w]白点クリックWB  [W]WBリセット  [g]ガンマ調整モード  [G]ガンマリセット")
         print("       [d]ダークフレーム取得（レンズキャップして押す）  [D]ダーククリア")
+        print("       [S]SER録画開始/停止トグル")
 
         frame_count = 0
         last_raw16 = None
         save_frame = None
+
+        # --- SERトグル録画状態 ---
+        _ser_recording = False
+        _ser_file = None       # 開くと BytesIO ではなく直接 open()
+        _ser_frame_count = 0
+        _ser_fname = ""
+        _ser_timestamps = []   # フレームごとの受信時刻 Ticks（トレーラー用）
         frame_bytes = first_frame_bytes
 
         # --- バックグラウンドスタックスレッド ---
@@ -901,6 +955,19 @@ def run_raw_live_stack(args):
             # --- LiveStack ---
             # raw16 Bayerをそのままバッファへ（12bit情報を消さずに保持）
             live_stack.add_to_buffer(raw16)
+
+            # --- SER リアルタイム追記 ---
+            if _ser_recording and _ser_file is not None and raw16 is not None:
+                import datetime
+                frame_f32 = raw16.astype(np.float32)
+                if live_stack.dark_frame is not None:
+                    frame_f32 = np.clip(frame_f32 - live_stack.dark_frame, 0, None)
+                _ser_file.write(frame_f32.clip(0, 65535).astype(np.uint16).tobytes())
+                # 受信時刻を .NET DateTime.Ticks (100ns単位) で記録
+                now_utc = datetime.datetime.utcnow()
+                ticks = int((now_utc - datetime.datetime(1, 1, 1)).total_seconds() * 10_000_000)
+                _ser_timestamps.append(ticks)
+                _ser_frame_count += 1
 
             if stack_enabled:
                 _stack_event.set()           # バックグラウンドスタックを起動
@@ -995,6 +1062,13 @@ def run_raw_live_stack(args):
             if settings_menu.menu_active:
                 preview_frame = settings_menu.draw_menu(preview_frame)
 
+            # --- REC インジケータ ---
+            if _ser_recording:
+                cv2.circle(preview_frame, (preview_frame.shape[1] - 18, 18), 8, (0, 0, 220), -1)
+                cv2.putText(preview_frame, f"REC {_ser_frame_count}f",
+                    (preview_frame.shape[1] - 100, 24),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 220), 1, cv2.LINE_AA)
+
             cv2.imshow(PREVIEW_WINDOW_NAME, preview_frame)
 
             # --- キー入力 ---
@@ -1078,6 +1152,51 @@ def run_raw_live_stack(args):
                 png_frame = apply_gamma_correction(wb_full, gamma_value)
                 cv2.imwrite(fname, png_frame)
                 print(f"[save] PNG: {fname}  (WB/Gamma適用後, フルサイズ)")
+            elif key == ord("S"):
+                if not _ser_recording:
+                    # --- 録画開始 ---
+                    import struct, datetime
+                    # ColorID=BayerパターンID: SER Player互換（RGGB↔BGGR, GRBG↔GBRG を反転）
+                    color_id_map = {"RGGB": 11, "GRBG": 10, "GBRG": 9, "BGGR": 8}
+                    color_id = color_id_map.get(bayer_keys[bayer_idx], 0)
+                    h_r = last_raw16.shape[0] if last_raw16 is not None else args.height
+                    w_r = last_raw16.shape[1] if last_raw16 is not None else args.width
+                    now_utc = datetime.datetime.utcnow()
+                    ticks = int((now_utc - datetime.datetime(1, 1, 1)).total_seconds() * 10_000_000)
+                    header = (
+                        b"LUCAM-RECORDER"
+                        + struct.pack("<I", 0)
+                        + struct.pack("<I", color_id)    # ColorID: Bayerパターン (8-11)
+                        + struct.pack("<I", 0)            # LittleEndian: 0=SER Player互換 (フラグ意味が逆のため)
+                        + struct.pack("<I", w_r)
+                        + struct.pack("<I", h_r)
+                        + struct.pack("<I", 16)          # PixelDepthPerPlane: 16bit (C実装に合わせ固定)
+                        + struct.pack("<I", 0)   # フレーム数: 停止時にパッチ
+                        + b"LiveStack".ljust(40, b"\x00")[:40]
+                        + b"rpicam-raw".ljust(40, b"\x00")[:40]
+                        + b"".ljust(40, b"\x00")
+                        + struct.pack("<q", ticks)
+                        + struct.pack("<q", ticks)
+                    )
+                    _ser_fname = f"raw_live_stack_frame{frame_count}.ser"
+                    _ser_file = open(_ser_fname, "wb")
+                    _ser_file.write(header)
+                    _ser_frame_count = 0
+                    _ser_timestamps.clear()
+                    _ser_recording = True
+                    print(f"[SER] 録画開始: {_ser_fname}  {w_r}x{h_r} {fmt['bits']}bit {bayer_keys[bayer_idx]} (ColorID={color_id})")
+                else:
+                    # --- 録画停止: トレーラー書き込み + フレーム数パッチ ---
+                    import struct
+                    for ts in _ser_timestamps:
+                        _ser_file.write(struct.pack("<q", ts))
+                    _ser_file.seek(38)
+                    _ser_file.write(struct.pack("<I", _ser_frame_count))
+                    _ser_file.close()
+                    _ser_file = None
+                    _ser_recording = False
+                    _ser_timestamps.clear()
+                    print(f"[SER] 録画停止: {_ser_fname}  {_ser_frame_count}フレーム")
             elif key == ord("r") and last_raw16 is not None:
                 fname = f"raw_live_stack_frame{frame_count}_raw16.npy"
                 np.save(fname, last_raw16)
@@ -1165,6 +1284,14 @@ def run_raw_live_stack(args):
     except KeyboardInterrupt:
         print("\n[終了]")
     finally:
+        if _ser_recording and _ser_file is not None:
+            import struct
+            for ts in _ser_timestamps:
+                _ser_file.write(struct.pack("<q", ts))
+            _ser_file.seek(38)
+            _ser_file.write(struct.pack("<I", _ser_frame_count))
+            _ser_file.close()
+            print(f"[SER] 終了につき録画保存: {_ser_fname}  {_ser_frame_count}フレーム")
         _stack_stop.set()
         _stack_event.set()   # wait() をすぐに解除してスレッドを終了させる
         _stack_thread.join(timeout=5.0)
