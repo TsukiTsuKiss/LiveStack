@@ -12,3 +12,6 @@ __pycache__/
 # 一時ファイル
 *.tmp
 *.bak
+
+# VS Code ワークスペース設定
+.vscode/
