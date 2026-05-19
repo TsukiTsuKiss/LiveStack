@@ -6,11 +6,15 @@ Raspberry Pi Camera2用のリアルタイムプレビューアプリケーショ
 
 ```
 camera-live/
-├── live_view.py      # シンプルなライブプレビュー
-├── raw_live_view.py  # rpicam-raw TCP受信専用プレビュー
-├── live_stack.py     # LiveStack機能付きプレビュー
+├── live_view.py          # シンプルなライブプレビュー
+├── raw_live_view.py      # rpicam-raw TCP受信専用プレビュー
+├── live_stack.py         # LiveStack機能付きプレビュー（カメラ直結）
+├── raw_live_stack.py     # rpicam-raw TCP受信 + LiveStack（RAW専用）
 ├── common/
-│   └── camera_config.py  # 共通カメラ設定
+│   ├── camera_config.py  # 共通カメラ設定
+│   ├── display_utils.py  # 表示ユーティリティ
+│   ├── hist_overlay.py   # ヒストグラム+CCDFオーバーレイ
+│   └── raw_utils.py      # RAW受信・デコード・WB/ガンマ共通処理
 └── README.md
 ```
 
@@ -109,7 +113,52 @@ python raw_live_view.py --source tcp://192.168.1.17:8888 \
 - `g`: ガンマ調整モード ON/OFF（左右キーで変更）
 - `G`: ガンマリセット（0.80）
 
-### 3. Live Stack (`live_stack.py`)
+### 3. RAW Live Stack (`raw_live_stack.py`)
+`rpicam-raw` の生TCPストリームを受信しながらリアルタイムにフレームをスタックするRAW専用アプリ。
+
+**主な特徴:**
+- **raw16バッファ**: バッファを12bit Bayer（uint16）のまま保持し、加算スタック後に固定スケール（÷16）で8bit変換して表示することで暗い星が枚数増加とともに浮かび上がる
+- **スタックスレッド分離**: `process_stack` をバックグラウンドスレッドで実行し、メインスレッドはキー入力・フレーム受信・表示を独立して継続するため、重いスタック計算中でも操作が止まらない
+- **ダークフレーム**: `[d]` でレンズキャップ状態のフレームを取得・平均化。`[D]` でクリア
+- **12bitネイティブヒストグラム+CCDF**: raw16空間のデータをそのままヒストグラム表示（1/4サブサンプリングで高速化）
+- **ストレッチマーカー（▲△）**: Stack OFF時に自動ストレッチの下限・上限をヒストグラム上に表示
+- **WB/ガンマ最適化**: リサイズ後の小さい画像にWB/ガンマを適用（フルサイズ処理を回避して高速化）
+- **PNG保存**: `[s]` 押下時にフルサイズ画像にWB/ガンマを適用してから保存
+- **FITS保存**: `[f]` でuint16フルサイズ保存（平均化した加算スタック）
+
+**起動例（IMX678 確定設定）:**
+```bash
+# 送信側 (Raspberry Pi)
+rpicam-raw --width 3840 --height 2160 --framerate 0.3 \
+           --shutter 600000 --gain 1 -t 0 --listen -o tcp://0.0.0.0:8888
+
+# 受信側 (Windows PC)
+python raw_live_stack.py --source tcp://192.168.1.17:8888 \
+    --bits 12 --bayer BGGR --raw-width 3856 --raw-height 2180 --stride 5792
+```
+
+**操作:**
+- `q`: 終了
+- `m`: 設定メニュー
+- `i`: 情報表示 ON/OFF
+- `t`: LiveStack ON/OFF
+- `R`: LiveStackリセット
+- `s`: PNG保存（WB/ガンマ適用後、フルサイズ）
+- `f`: FITS保存（uint16、スタック平均値）
+- `r`: NPY保存（16bit RAW）
+- `h`: ヒストグラム+CCDF ON/OFF
+- `a`: 自動ストレッチ ON/OFF
+- `b`: Bayerパターン切り替え
+- `n`: 次のフォーマット候補
+- `+` / `-`: skip ±1ストライド
+- `w`: 白点クリックWB ON/OFF
+- `W`: WBリセット
+- `g`: ガンマ調整モード（左右キーで ±0.05）
+- `G`: ガンマリセット（0.80）
+- `d`: ダークフレーム取得（レンズキャップして押す、複数回で加算平均）
+- `D`: ダークフレームクリア
+
+### 4. Live Stack (`live_stack.py`)
 リアルタイムでフレームを加算スタックし、ノイズ軽減と画質向上を実現するプレビューアプリケーション（カメラ切り替え機能付き）。
 
 #### 主な機能
@@ -240,8 +289,11 @@ python3 live_stack.py --source 0
 python3 live_view.py --source tcp://192.168.1.17:8888
 python3 live_stack.py --source tcp://192.168.1.17:8888
 
-# RAW TCPストリーム (rpicam-raw)
+# RAW TCPストリーム (rpicam-raw) プレビューのみ
 python3 raw_live_view.py --source tcp://192.168.1.17:8888 --bits 12 --bayer BGGR --raw-width 3856 --raw-height 2180 --stride 5792
+
+# RAW TCPストリーム (rpicam-raw) + LiveStack
+python raw_live_stack.py --source tcp://192.168.1.17:8888 --bits 12 --bayer BGGR --raw-width 3856 --raw-height 2180 --stride 5792
 ```
 
 ### 送信側（Raspberry Pi: rpicam-vid の例）
@@ -330,6 +382,16 @@ pip install astropy Pillow piexif opencv-python picamera2
 ```
 
 ## 変更履歴
+
+#### 2026/05/19 raw_live_stack.py: スレッド分離・パフォーマンス改善
+- **スタックスレッド分離**: `process_stack` をバックグラウンドスレッド化し、重い計算中でもキー入力・表示が止まらないよう改善
+- **raw16バッファ化**: スタックバッファを12bit Bayer（uint16）のまま保持し、加算値を固定スケール（÷16）で8bit変換して暗い星を段階的に浮かび上がらせる
+- **WB/ガンマ最適化**: リサイズ後の小画像に適用することで処理量を約1/16に削減
+- **ヒストグラム高速化**: 1/4サブサンプリング（`[::4, ::4]`）で計算量を1/16に削減
+- **ダークフレームキー**: `[d]`（取得・加算平均）/ `[D]`（クリア）を追加
+- **PNG保存**: フルサイズにWB/ガンマを適用してから保存するよう修正
+- **FITS保存**: uint16でフルサイズ保存（スタック平均値）
+- **12bitネイティブヒストグラム**: raw16空間でヒストグラム+CCDF表示、stretch▲△マーカー追加
 
 #### 2026/05/10 リモートソース対応・判定整合改善
 - **source対応**: `live_view.py` / `live_stack.py` に `--source` を追加（カメラ番号または `tcp://...` を指定可能）。
