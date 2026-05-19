@@ -245,11 +245,14 @@ def run_raw_live_view(args):
                 mouse_ctx["pending_msg"] = None
 
             if show_hist:
+                hist_native = last_raw16[::4, ::4].astype(np.float32) if last_raw16 is not None else None
                 disp = draw_hist_ccdf_overlay(
                     disp,
                     disp,
                     brightness_threshold=255,
                     stop_ratio=0.10,
+                    bits=fmt["bits"],
+                    native_source=hist_native,
                 )
 
             cv2.imshow(PREVIEW_WINDOW_NAME, disp)
