@@ -830,7 +830,7 @@ def run_raw_live_stack(args):
         disp_w, disp_h = _sized.shape[1], _sized.shape[0]
         print(f"[view] 表示サイズ: {disp_w}x{disp_h}  (入力: {args.width}x{args.height}, 画面: {screen_size})")
 
-        cv2.namedWindow(PREVIEW_WINDOW_NAME, cv2.WINDOW_NORMAL)
+        cv2.namedWindow(PREVIEW_WINDOW_NAME, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
         cv2.resizeWindow(PREVIEW_WINDOW_NAME, disp_w, disp_h)
 
         # --- WB / ガンマ 初期化 ---

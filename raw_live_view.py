@@ -121,7 +121,7 @@ def run_raw_live_view(args):
             "pending_msg": None,
         }
 
-        cv2.namedWindow(PREVIEW_WINDOW_NAME, cv2.WINDOW_NORMAL)
+        cv2.namedWindow(PREVIEW_WINDOW_NAME, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
         cv2.namedWindow(WB_WINDOW_NAME, cv2.WINDOW_NORMAL)
 
         def slider_to_gain(v):
