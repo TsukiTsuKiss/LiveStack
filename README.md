@@ -154,6 +154,12 @@ python raw_live_view.py --source tcp://192.168.1.17:8888 \
 
 > この考え方は `raw_live_view.py` と `raw_live_stack.py` の両方で共通です。
 
+**12U 対応の背景（IMX708）:**
+
+- 運用履歴として、IMX708 で `12:P` が選べない/安定しない環境があり、`12:U` 受信に対応した。
+- これは IMX708 専用実装ではなく、`12:U`（12bitを16bitコンテナで運ぶ形式）全般への対応。
+- `12:U` はセンサー/ドライバ実装で有効12bit位置が異なる場合があるため、受信側で位置合わせ（例: `>>4`）が必要になる。
+
 **操作:**
 - `q`: 終了
 - `s`: PNG保存（WB適用後）
@@ -190,6 +196,35 @@ rpicam-raw --width 3840 --height 2160 --framerate 0.3 \
 # 受信側 (Windows PC)
 python raw_live_stack.py --source tcp://192.168.1.17:8888 \
     --bits 12 --bayer BGGR --raw-width 3856 --raw-height 2180 --stride 5792
+```
+
+**起動例（12U運用。IMX708 など）:**
+```bash
+# 送信側 (Raspberry Pi)
+rpicam-raw --mode 4608:2592:12:U -t 0 --listen -o tcp://0.0.0.0:8888 --shutter 1000000
+
+# 受信側 (Windows PC)
+python raw_live_stack.py --source tcp://192.168.1.63:8888 \
+   --wire-format 12u --u12-shift auto --bayer RGGB --raw-width 4608 --raw-height 2592
+```
+
+**12U/12P 指定の考え方:**
+
+- `12:P` を使える場合は `--wire-format 12p` を推奨（従来互換で扱いやすい）。
+- `12:U` を使う場合は `--wire-format 12u --u12-shift auto` を推奨。
+- `10:U` を使う場合は `--wire-format 10u --u10-shift auto` を推奨。
+- `--u12-shift` は `auto/0/4` を選択可能。
+- `--u10-shift` は `auto/0/6` を選択可能。
+- `12:U` でもヒストグラム・閾値判定は有効12bit（上限4095）として扱う。
+
+**10U 運用例（IMX219 など）:**
+```bash
+# 送信側 (Raspberry Pi) 例
+rpicam-raw --mode 1640:1232:10:U -t 0 --listen -o tcp://0.0.0.0:8888
+
+# 受信側 (Windows PC)
+python raw_live_stack.py --source tcp://192.168.1.63:8888 \
+   --wire-format 10u --u10-shift auto --bayer BGGR --raw-width 1640 --raw-height 1232
 ```
 
 **操作:**

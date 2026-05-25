@@ -36,6 +36,8 @@ def draw_hist_ccdf_overlay(target_frame, source_frame, brightness_threshold=255,
         hist = hist.astype(np.float32)
         thr_native = int(np.clip(brightness_threshold, 0, max_native))
         thr_bin = int(thr_native * 255 / max_native)  # 0-255のbin indexに変換
+        # 表示値は bin 近似ではなく、しきい値そのものに対する実測比率を使う。
+        overflow_exact = float(np.mean(data >= float(thr_native)))
     else:
         # フォールバック: uint8 BGR source_frame を使用
         if len(source_frame.shape) == 3 and source_frame.shape[2] >= 3:
@@ -45,6 +47,7 @@ def draw_hist_ccdf_overlay(target_frame, source_frame, brightness_threshold=255,
         hist = cv2.calcHist([metric], [0], None, [256], [0, 256]).flatten()
         thr_bin = int(np.clip(brightness_threshold, 0, 255))
         thr_native = thr_bin << max(0, bits - 8)
+        overflow_exact = float(np.mean(metric >= thr_bin))
 
     total = float(np.sum(hist))
     if total <= 0:
@@ -101,7 +104,7 @@ def draw_hist_ccdf_overlay(target_frame, source_frame, brightness_threshold=255,
         tri_hi = np.array([[x_hi, ty], [x_hi - ts, ty + ts], [x_hi + ts, ty + ts]], dtype=np.int32)
         cv2.polylines(target_frame, [tri_hi], True, (0, 165, 255), 1, cv2.LINE_AA)
 
-    overflow_at_thr = float(ccdf[min(thr_bin, 255)])
+    overflow_at_thr = float(np.clip(overflow_exact, 0.0, 1.0))
     y_ccdf = gy + gh - int(overflow_at_thr * (gh - 1))
     cv2.circle(target_frame, (x_thr, y_ccdf), 4, (0, 255, 255), -1)
 
@@ -117,7 +120,7 @@ def draw_hist_ccdf_overlay(target_frame, source_frame, brightness_threshold=255,
     cv2.putText(target_frame, f"T={thr_native}", (x0 + 8, info_y), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 255), 1)
     cv2.putText(
         target_frame,
-        f"R={int(ratio * 100)}%  P(X>=T)={overflow_at_thr * 100:.2f}%",
+        f"R(stop)>={int(ratio * 100)}%  P(X>=T)={overflow_at_thr * 100:.2f}%",
         (x0 + 68, info_y),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.42,

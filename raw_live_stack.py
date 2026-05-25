@@ -48,17 +48,20 @@ from hist_overlay import draw_hist_ccdf_overlay
 from display_utils import clamp, draw_info_lines, fit_display_frame, get_screen_size
 from raw_utils import (
     BAYER_MAP,
+    apply_wire_format_preset,
     apply_gamma_correction,
     apply_white_balance,
     calc_candidates,
     compute_wb_gains_from_patch,
     decode_to_raw16,
     min_stride_for_bits,
+    normalize_effective_raw16,
     parse_tcp_source,
     probe_format,
     raw16_to_bgr8,
     raw16_to_bgr8_stretched,
     recv_exact,
+    resolve_effective_bits_and_shift,
 )
 
 
@@ -98,6 +101,23 @@ def compute_white_ratio_uint8(frame_uint8, threshold):
     return float(white_pixels) / float(total_pixels)
 
 
+def compute_white_ratio_native(frame_native, threshold_native):
+    """ネイティブbit深度配列に対して P(X>=threshold) を計算する。"""
+    if frame_native is None:
+        return 0.0
+    arr = np.asarray(frame_native)
+    if arr.size == 0:
+        return 0.0
+    metric = arr
+    if arr.ndim == 3 and arr.shape[2] >= 3:
+        metric = np.max(arr[:, :, :3], axis=2)
+    white_pixels = np.sum(metric >= float(threshold_native))
+    total_pixels = metric.shape[0] * metric.shape[1]
+    if total_pixels <= 0:
+        return 0.0
+    return float(white_pixels) / float(total_pixels)
+
+
 # ---------------------------------------------------------------------------
 # LiveStack クラス
 # ---------------------------------------------------------------------------
@@ -111,8 +131,10 @@ class LiveStack:
         self.bits = bits  # 元データのビット深度
         self.overflow_ratio_threshold = 0.10  # 打ち切り比率（例: 0.10 = 10%）
         self.brightness_threshold = (1 << bits) - 1  # 打ち切り輝度しきい値（ネイティブビット深度で表現）
+        self.include_overflow_frame = False  # True: しきい値超過フレームも1枚含めて停止
         self.reset()
         self.buffer = [None] * max_frames  # Noneで初期化
+        self.buffer_frame_ids = [None] * max_frames  # 各バッファ要素に対応するフレーム番号
         self.buffer_index = 0
         self.dark_frame = None  # d キーで取得するまでは None（サイズを動的に合わせるため）
         self.dark_buffer = []  # ダークフレーム用リングバッファ
@@ -128,6 +150,9 @@ class LiveStack:
         self.fixed_stack_count = None  # 固定スタック数
         self.failed_count = 0          # 連続失敗カウント
         self.stacked_raw16 = None      # raw16空間のfloat32累積スタック（FITS保存用）
+        self.last_stop_reason = "reset"
+        self.last_overflow_ratio = 0.0
+        self.last_processed_frame_id = None
 
     def add_frame(self, frame):
         """フレームをスタックに追加"""
@@ -271,17 +296,61 @@ class LiveStack:
             print(f"スタッキングエラー: {e}")
             return frame, False
 
-    def add_to_buffer(self, frame):
+    def add_to_buffer(self, frame, frame_id=None):
         """リングバッファにフレームを追加"""
         self.buffer[self.buffer_index] = frame
+        self.buffer_frame_ids[self.buffer_index] = frame_id
         self.buffer_index = (self.buffer_index + 1) % self.max_frames
+
+    def get_latest_frame_id(self):
+        """現在バッファにある最新フレームIDを返す。"""
+        idx = (self.buffer_index - 1 + self.max_frames) % self.max_frames
+        return self.buffer_frame_ids[idx]
+
+    def resize_max_frames(self, new_max_frames):
+        """リングバッファ/ダークバッファを保ったまま最大フレーム数を変更する。"""
+        new_max_frames = int(max(1, new_max_frames))
+        if new_max_frames == self.max_frames:
+            return
+
+        old_buffer = self.buffer
+        old_ids = self.buffer_frame_ids
+        old_len = len(old_buffer)
+
+        # 旧リングバッファを時系列順（古い→新しい）に展開
+        ordered = []
+        ordered_ids = []
+        for i in range(old_len):
+            idx = (self.buffer_index + i) % old_len
+            f = old_buffer[idx]
+            if f is not None:
+                ordered.append(f)
+            ordered_ids.append(old_ids[idx])
+
+        # 最新フレームを優先して保持
+        ordered = ordered[-new_max_frames:]
+        ordered_ids = ordered_ids[-new_max_frames:]
+
+        self.max_frames = new_max_frames
+        self.buffer = [None] * new_max_frames
+        self.buffer_frame_ids = [None] * new_max_frames
+        for i, f in enumerate(ordered):
+            self.buffer[i] = f
+            self.buffer_frame_ids[i] = ordered_ids[i]
+        self.buffer_index = len(ordered) % new_max_frames
+
+        if len(self.dark_buffer) > new_max_frames:
+            self.dark_buffer = self.dark_buffer[-new_max_frames:]
 
     def process_stack(self, bayer_code):
         """スタック処理を実行（バッファはraw16 uint16 Bayerで保持）"""
         latest_index = (self.buffer_index - 1 + self.max_frames) % self.max_frames
         if self.buffer[latest_index] is None:
             print("リングバッファが空です。スタック処理をスキップします。")
+            self.last_stop_reason = "buffer-empty"
+            self.last_overflow_ratio = 0.0
             return None
+        latest_frame_id = self.buffer_frame_ids[latest_index]
 
         # 最新フレーム（raw16 Bayer float32）
         latest_f32 = self.buffer[latest_index].astype(np.float32)
@@ -306,10 +375,13 @@ class LiveStack:
         threshold_8 = int(self.brightness_threshold >> max(0, self.bits - 8))
 
         valid_stack_count = 1  # 最新フレームを含む
+        stop_reason = None
+        last_overflow_ratio = 0.0
         for i in range(self.max_frames - 1):
             past_index = (self.buffer_index - 2 - i + self.max_frames) % self.max_frames
             past_raw16 = self.buffer[past_index]
             if past_raw16 is None:
+                stop_reason = "buffer-empty"
                 break
 
             past_f32 = past_raw16.astype(np.float32)
@@ -330,15 +402,31 @@ class LiveStack:
             # オーバーフロー判定: 加算値を固定スケールで8bit換算して閾値と比較
             display_test = np.clip(test_stack / scale, 0, 255)
             overflow_ratio = float(np.sum(display_test >= threshold_8)) / display_test.size
+            last_overflow_ratio = overflow_ratio
             if overflow_ratio >= self.overflow_ratio_threshold:
-                print(f"オーバーフロー条件に達しました (ratio={overflow_ratio:.3f} >= {self.overflow_ratio_threshold:.3f})。スタック処理を終了します。")
+                if self.include_overflow_frame:
+                    stacked = test_stack
+                    valid_stack_count += 1
+                    print(
+                        f"オーバーフロー条件に到達 (ratio={overflow_ratio:.3f} >= {self.overflow_ratio_threshold:.3f})。"
+                        "超過フレームを含めて終了します。"
+                    )
+                    stop_reason = "ratio-stop-included"
+                else:
+                    print(f"オーバーフロー条件に達しました (ratio={overflow_ratio:.3f} >= {self.overflow_ratio_threshold:.3f})。スタック処理を終了します。")
+                    stop_reason = "ratio-stop"
                 break
 
             stacked = test_stack
             valid_stack_count += 1
 
+        if stop_reason is None:
+            stop_reason = "max-frames"
         self.stack_count = valid_stack_count
         self.stacked_raw16 = stacked  # float32 Bayer累積スタック（FITS/NPY保存用）
+        self.last_stop_reason = stop_reason
+        self.last_overflow_ratio = last_overflow_ratio
+        self.last_processed_frame_id = latest_frame_id
 
         # 表示用: 加算値を固定スケール(bits→8bit)でそのまま変換
         # 1枚: 100ADU → 100/16 = 6  /  10枚加算: 1000ADU → 1000/16 = 62  → ヒストグラムが右シフト
@@ -457,9 +545,11 @@ class SettingsMenu:
             return True
         elif key_raw == 2424832:  # Left
             self.change_value(-1)
+            self.apply_requested = True
             return True
         elif key_raw == 2555904:  # Right
             self.change_value(1)
+            self.apply_requested = True
             return True
         # 互換用（環境差異）
         elif key in [82, 65]:  # 上
@@ -470,9 +560,11 @@ class SettingsMenu:
             return True
         elif key in [81, 68]:  # 左
             self.change_value(-1)
+            self.apply_requested = True
             return True
         elif key in [83, 67]:  # 右
             self.change_value(1)
+            self.apply_requested = True
             return True
         elif key in [10, 13]:  # Enter(LF/CR) - 設定適用（メニューは閉じない）
             self.apply_requested = True
@@ -565,7 +657,7 @@ class SettingsMenu:
         cv2.putText(frame, "Settings Menu", (60, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
         cv2.putText(frame, "Up/Down: Select Item  Left/Right: Change Value",
                    (60, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-        cv2.putText(frame, "Enter: Apply  ESC: Cancel",
+        cv2.putText(frame, "Left/Right: Apply Immediately  Enter: Re-Apply  ESC: Cancel",
                    (60, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
         # 設定項目を表示
@@ -743,11 +835,24 @@ def run_raw_live_stack(args):
     raw_h = args.raw_height if args.raw_height is not None else args.height
     crop = (raw_w != args.width or raw_h != args.height)
 
+    preset_info = apply_wire_format_preset(args, raw_w)
+    if preset_info is not None:
+        if args.wire_format == "12p":
+            print(f"[preset] wire-format=12p -> bits={preset_info['bits']} stride={preset_info['stride']}")
+        else:
+            print(
+                f"[preset] wire-format={args.wire_format} -> bits={preset_info['bits']} "
+                f"stride={preset_info['stride']} (effective_bits={preset_info['effective_bits']})"
+            )
+
     print(f"[RAW] 接続先: {args.source}")
     print(f"[RAW] 表示解像度: {args.width}x{args.height}")
     if crop:
         print(f"[RAW] RAW解像度: {raw_w}x{raw_h} (デコード後クロップ)")
     print(f"[RAW] Bayer: {args.bayer}  ビット: {'自動' if args.bits is None else args.bits}")
+    if args.wire_format in ("12u", "10u"):
+        effective_text = "12" if args.wire_format == "12u" else "10"
+        print(f"[RAW] wire-format={args.wire_format} を有効化: 受信コンテナ16bit / 有効ビット{effective_text}bit として処理します")
     if args.stride:
         print(f"[RAW] stride: {args.stride} bytes/行")
 
@@ -789,6 +894,14 @@ def run_raw_live_stack(args):
             fmt, candidates, first_frame_bytes, buf = probe_format(sock, raw_w, raw_h, args.bits)
             fmt_idx = candidates.index(fmt)
 
+        effective_info = resolve_effective_bits_and_shift(args, fmt, raw_w, raw_h, first_frame_bytes)
+        effective_bits = effective_info["effective_bits"]
+        effective_shift = effective_info["effective_shift"]
+        if effective_info["message"]:
+            print(effective_info["message"])
+        fmt["effective_bits"] = effective_bits
+        fmt["effective_shift"] = effective_shift
+
         skip = args.skip
         auto_stretch = not args.no_stretch
         show_hist = True
@@ -798,12 +911,12 @@ def run_raw_live_stack(args):
         bayer_code = BAYER_MAP[bayer_keys[bayer_idx]]
 
         stack_enabled = False
-        live_stack = LiveStack(max_frames=args.max_frames, verbose=False, bits=fmt["bits"])
+        live_stack = LiveStack(max_frames=args.max_frames, verbose=False, bits=effective_bits)
 
         settings_menu = SettingsMenu()
         stream_menu_names = {"Max Frames", "Stack Mode", "Info Display", "Stop Threshold", "Stop Ratio(%)"}        
         # Stop Threshold の範囲をビット深度に合わせて更新
-        max_val = (1 << fmt["bits"]) - 1
+        max_val = (1 << effective_bits) - 1
         for _s in settings_menu.settings:
             if _s["name"] == "Stop Threshold":
                 _s["max"] = max_val
@@ -881,6 +994,7 @@ def run_raw_live_stack(args):
 
         print("\n操作: [q]終了  [m]設定メニュー  [i]情報表示  [s]PNG保存  [r]NPY保存  [f]FITS保存")
         print("       [n]次候補フォーマット  [+/-]skip±1行  [a]ストレッチ切替  [b]Bayer切替")
+        print("       [o]停止判定モード切替（超過フレームを含む/含まない）")
         print("       [h]ヒストグラム切替  [t]LiveStack ON/OFF  [R]LiveStackリセット")
         print("       [w]白点クリックWB  [W]WBリセット  [g]ガンマ調整モード  [G]ガンマリセット")
         print("       [d]ダークフレーム取得（レンズキャップして押す）  [D]ダーククリア")
@@ -889,6 +1003,16 @@ def run_raw_live_stack(args):
         frame_count = 0
         last_raw16 = None
         save_frame = None
+        prev_frame_t = time.perf_counter()
+
+        perf_input_fps = [0.0]
+        perf_stack_ms = [0.0]
+        perf_stack_hz = [0.0]
+
+        def ema(prev, value, alpha=0.25):
+            if prev <= 0.0:
+                return value
+            return (1.0 - alpha) * prev + alpha * value
 
         # --- SERトグル録画状態 ---
         _ser_recording = False
@@ -902,11 +1026,13 @@ def run_raw_live_stack(args):
         _stack_event = threading.Event()   # 新フレーム追加を通知
         _stack_stop  = threading.Event()   # スレッド停止フラグ
         _stacked_bgr = [None]              # 最新スタック結果 (BGRフレーム)
+        _last_worker_frame_id = [None]     # 同一フレーム再計算を避けるための最後に処理したID
 
         def do_stack_reset():
             """live_stack.reset() + 表示バッファのクリアを一括実行"""
             live_stack.reset()
             _stacked_bgr[0] = None
+            _last_worker_frame_id[0] = None
 
         def _stack_worker():
             while not _stack_stop.is_set():
@@ -916,12 +1042,29 @@ def run_raw_live_stack(args):
                     break
                 if not triggered or not stack_enabled:
                     continue
+
+                latest_id = live_stack.get_latest_frame_id()
+                if latest_id is None:
+                    continue
+                if _last_worker_frame_id[0] == latest_id:
+                    # 新しいフレームが来ていない間は再計算しない
+                    continue
+
                 _t0 = time.perf_counter()
-                result = live_stack.process_stack(bayer_code)
+                try:
+                    result = live_stack.process_stack(bayer_code)
+                except Exception as e:
+                    print(f"[stack worker error] {e}")
+                    result = None
                 _t1 = time.perf_counter()
+                elapsed_ms = (_t1 - _t0) * 1000.0
+                perf_stack_ms[0] = ema(perf_stack_ms[0], elapsed_ms)
+                if elapsed_ms > 0.0:
+                    perf_stack_hz[0] = ema(perf_stack_hz[0], 1000.0 / elapsed_ms)
                 print(f"[perf] process_stack: {(_t1 - _t0) * 1000:.0f}ms  frames={live_stack.stack_count}")
                 if result is not None:
                     _stacked_bgr[0] = result
+                    _last_worker_frame_id[0] = latest_id
 
         _stack_thread = threading.Thread(
             target=_stack_worker, daemon=True, name="stack-worker"
@@ -935,19 +1078,25 @@ def run_raw_live_stack(args):
                 raw16 = decode_to_raw16(payload, fmt, raw_w, raw_h)
                 if crop:
                     raw16 = raw16[:args.height, :args.width]
+                raw16 = normalize_effective_raw16(raw16, fmt["bits"], effective_bits, effective_shift)
 
                 # スタック用: ストレッチなし・生のデベイヤ画像
-                bgr = raw16_to_bgr8(raw16, fmt["bits"], bayer_code)
+                bgr = raw16_to_bgr8(raw16, effective_bits, bayer_code)
 
                 # 表示用: ストレッチあり or なし
                 if auto_stretch:
                     bgr_disp, s_lo, s_hi = raw16_to_bgr8_stretched(raw16, bayer_code)
                 else:
                     bgr_disp = bgr.copy()
-                    s_lo, s_hi = 0.0, float((1 << fmt["bits"]) - 1)
+                    s_lo, s_hi = 0.0, float((1 << effective_bits) - 1)
 
                 last_raw16 = raw16
                 frame_count += 1
+                now_t = time.perf_counter()
+                dt = now_t - prev_frame_t
+                prev_frame_t = now_t
+                if dt > 0.0:
+                    perf_input_fps[0] = ema(perf_input_fps[0], 1.0 / dt)
             except Exception as e:
                 print(f"[decode error] {e}")
                 bgr = bgr_disp = np.zeros((args.height // 4, args.width // 4, 3), dtype=np.uint8)
@@ -955,13 +1104,13 @@ def run_raw_live_stack(args):
 
             # --- LiveStack ---
             # raw16 Bayerをそのままバッファへ（12bit情報を消さずに保持）
-            live_stack.add_to_buffer(raw16)
+            live_stack.add_to_buffer(raw16, frame_count)
 
             # --- SER リアルタイム追記 ---
             # スタックON: スタック加算値を書き込む / スタックOFF: 最新1フレームを書き込む
             if _ser_recording and _ser_file is not None:
                 import datetime
-                shift = 0 if args.ser_lsb else (16 - fmt["bits"])  # LSB詰め or MSB詰め(上位詰め)
+                shift = 0 if args.ser_lsb else (16 - effective_bits)  # LSB詰め or MSB詰め(上位詰め)
                 if stack_enabled and live_stack.stacked_raw16 is not None:
                     ser_f32 = live_stack.stacked_raw16.astype(np.float32)
                 elif raw16 is not None:
@@ -986,6 +1135,12 @@ def run_raw_live_stack(args):
             else:
                 save_frame = bgr_disp.copy()
                 display_frame = bgr_disp.copy()
+
+            # Now表示とCCDF描画で同じ母集団を使うため、ここでネイティブ統計配列を1回だけ確定する。
+            native_stats = None
+            if stack_enabled and live_stack.stacked_raw16 is not None:
+                max_native = float((1 << live_stack.bits) - 1)
+                native_stats = np.clip(live_stack.stacked_raw16[::4, ::4], 0.0, max_native)
 
             display_frame_ref[0] = save_frame  # クリックWB用に WB適用前を保持
 
@@ -1015,8 +1170,28 @@ def run_raw_live_stack(args):
                     f"{args.source}  {src_w}x{src_h}  frame#{frame_count}",
                     f"{fmt['name'].strip()} | Bayer:{bayer_name} | {stretch_label} | Stack:{'ON' if stack_enabled else 'OFF'}",
                 ]
+                if args.wire_format in ("12u", "10u"):
+                    lines.append(
+                        f"{args.wire_format} decode: effective={effective_bits}bit (>>{effective_shift})"
+                    )
                 if stack_enabled:
                     lines.append(f"Frames: {live_stack.stack_count} / {live_stack.max_frames}")
+                    lines.append(
+                        f"StopReason: {live_stack.last_stop_reason}  lastRatio:{live_stack.last_overflow_ratio * 100:.2f}%"
+                    )
+                    if perf_input_fps[0] > 0.0 or perf_stack_hz[0] > 0.0:
+                        lag_frames = 0
+                        if live_stack.last_processed_frame_id is not None:
+                            lag_frames = max(0, frame_count - int(live_stack.last_processed_frame_id))
+                        util = 0.0
+                        if perf_input_fps[0] > 1e-6:
+                            util = perf_stack_hz[0] / perf_input_fps[0]
+                        lines.append(
+                            f"Perf InFPS:{perf_input_fps[0]:.2f}  StackHz:{perf_stack_hz[0]:.2f}  StackMs:{perf_stack_ms[0]:.0f}  Util:{util:.2f}x  Lag:{lag_frames}frm"
+                        )
+                    lines.append(
+                        f"StopMode: {'include-crossing-frame' if live_stack.include_overflow_frame else 'exclude-crossing-frame'}"
+                    )
                 lines.append(
                     f"WB B:{wb_gains[0]:.2f} G:{wb_gains[1]:.2f} R:{wb_gains[2]:.2f} | Gamma:{gamma_value:.2f} | click:{'ON' if click_wb_mode else 'OFF'}"
                 )
@@ -1024,30 +1199,40 @@ def run_raw_live_stack(args):
                     vmin = int(last_raw16.min())
                     vmax = int(last_raw16.max())
                     vmean = float(last_raw16.mean())
-                    lines.append(f"min={vmin}  max={vmax}  mean={vmean:.1f}  (max={(1 << fmt['bits']) - 1})")
+                    lines.append(f"min={vmin}  max={vmax}  mean={vmean:.1f}  (max={(1 << effective_bits) - 1})")
                     if auto_stretch:
                         lines.append(f"stretch[{s_lo:.0f} - {s_hi:.0f}]")
                     print(f"[frame#{frame_count}] {'  '.join(lines[2:])}")
                 if stack_enabled:
-                    threshold_8 = int(live_stack.brightness_threshold >> max(0, live_stack.bits - 8))
-                    current_ratio = compute_white_ratio_uint8(save_frame, threshold_8)
-                    lines.append(f"Now: {current_ratio * 100:.2f}% / Limit: {live_stack.overflow_ratio_threshold * 100:.2f}%  Thresh:{live_stack.brightness_threshold}")
+                    # CCDFと同じネイティブbit深度データ基準でNow比率を計算する。
+                    if native_stats is not None:
+                        current_ratio = compute_white_ratio_native(
+                            native_stats,
+                            live_stack.brightness_threshold,
+                        )
+                    elif last_raw16 is not None:
+                        current_ratio = compute_white_ratio_native(
+                            last_raw16,
+                            live_stack.brightness_threshold,
+                        )
+                    else:
+                        current_ratio = 0.0
+                    lines.append(
+                        f"Now: {current_ratio * 100:.2f}% / Stop@>= {live_stack.overflow_ratio_threshold * 100:.2f}%  Thresh:{live_stack.brightness_threshold}"
+                    )
                 draw_info_lines(preview_frame, lines)
 
             if info_display and show_hist:
-                if stack_enabled and live_stack.stacked_raw16 is not None:
+                if stack_enabled and native_stats is not None:
                     # 加算累積を max_native でクリップ → 溢れたピクセルが最大ビンに積まれ
                     # CCDFが閾値/比率の交点を正しく通過する
-                    max_native = float((1 << live_stack.bits) - 1)
-                    # 1/4サブサンプリングで計算量を1/16に削減（統計的な精度は十分）
-                    hist_native = np.clip(live_stack.stacked_raw16[::4, ::4], 0.0, max_native)
                     preview_frame = draw_ccdf_overlay(
                         preview_frame,
                         save_frame,
                         brightness_threshold=live_stack.brightness_threshold,
                         stop_ratio=live_stack.overflow_ratio_threshold,
                         bits=live_stack.bits,
-                        native_source=hist_native,
+                        native_source=native_stats,
                         stretch_lo=None,
                         stretch_hi=None,
                     )
@@ -1087,7 +1272,7 @@ def run_raw_live_stack(args):
                 if settings_menu.apply_requested:
                     values = settings_menu.get_current_values()
                     if values["max_frames"] != live_stack.max_frames:
-                        live_stack.max_frames = values["max_frames"]
+                        live_stack.resize_max_frames(values["max_frames"])
                         print(f"Max Frames設定: {live_stack.max_frames}")
                     if values["stack_mode"] != stack_enabled:
                         stack_enabled = values["stack_mode"]
@@ -1191,7 +1376,7 @@ def run_raw_live_stack(args):
                     _ser_frame_count = 0
                     _ser_timestamps.clear()
                     _ser_recording = True
-                    print(f"[SER] 録画開始: {_ser_fname}  {w_r}x{h_r} {fmt['bits']}bit {bayer_keys[bayer_idx]} (ColorID={color_id})")
+                    print(f"[SER] 録画開始: {_ser_fname}  {w_r}x{h_r} effective={effective_bits}bit (container={fmt['bits']}bit) {bayer_keys[bayer_idx]} (ColorID={color_id})")
                 else:
                     # --- 録画停止: トレーラー書き込み + フレーム数パッチ ---
                     import struct
@@ -1213,13 +1398,13 @@ def run_raw_live_stack(args):
                     "STACKCNT": live_stack.stack_count,
                     "MODE": "LiveStack" if stack_enabled else "LiveView",
                     "DATE": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "BITPIX": fmt["bits"],
+                    "BITPIX": effective_bits,
                 }
                 fname = f"raw_live_stack_frame{frame_count}.fits"
                 if stack_enabled and live_stack.stacked_raw16 is not None:
                     # raw16空間で加算したスタックをN枚平均してuint16 RGBで保存
                     n = max(1, live_stack.stack_count)
-                    max_native = (1 << fmt["bits"]) - 1
+                    max_native = (1 << effective_bits) - 1
                     avg16 = np.clip(live_stack.stacked_raw16 / n, 0, max_native).astype(np.uint16)
                     bgr16 = cv2.cvtColor(avg16, bayer_code)  # uint16 BGR
                     save_fits(bgr16, fname, metadata)
@@ -1244,6 +1429,12 @@ def run_raw_live_stack(args):
             elif key == ord("R"):
                 do_stack_reset()
                 print("[stack] reset")
+            elif key == ord("o"):
+                live_stack.include_overflow_frame = not live_stack.include_overflow_frame
+                do_stack_reset()
+                print(
+                    f"[stack] 停止判定モード: {'超過フレームを含める' if live_stack.include_overflow_frame else '超過フレームを含めない'}"
+                )
             elif key == ord("d") and last_raw16 is not None:
                 live_stack.set_dark_frame(last_raw16)
                 n = len(live_stack.dark_buffer)
@@ -1315,7 +1506,10 @@ def build_arg_parser():
     parser.add_argument("--raw-width", type=int, default=None, help="実センサーRAW幅 (省略時=--width。例: IMX678=3856)")
     parser.add_argument("--raw-height", type=int, default=None, help="実センサーRAW高さ (省略時=--height。例: IMX678=2180)")
     parser.add_argument("--stride", type=int, default=None, help="1行あたりのバイト数を直接指定 (例: IMX678=5792)")
-    parser.add_argument("--bits", type=int, default=None, choices=[8, 10, 12, 16], help="ビット深度を強制指定 (未指定=自動推定)")
+    parser.add_argument("--wire-format", type=str, default=None, choices=["12p", "12u", "10u"], help="送信側ワイヤ形式プリセット。12p=12bit packed, 12u/10u=unpacked(16bit容器)")
+    parser.add_argument("--u12-shift", type=str, default="auto", choices=["auto", "0", "4"], help="--wire-format 12u 時の有効12bit位置。auto=自動判定, 0=LSB詰め, 4=MSB詰め(>>4)")
+    parser.add_argument("--u10-shift", type=str, default="auto", choices=["auto", "0", "6"], help="--wire-format 10u 時の有効10bit位置。auto=自動判定, 0=LSB詰め, 6=MSB詰め(>>6)")
+    parser.add_argument("--bits", type=int, default=None, choices=[8, 10, 12, 16], help="ビット深度を強制指定 (未指定=自動推定)。迷う場合は --wire-format を優先")
     parser.add_argument("--bayer", type=str, default="BGGR", choices=list(BAYER_MAP.keys()), help="Bayerパターン (デフォルト: BGGR / IMX678確認済み)")
     parser.add_argument("--skip", type=int, default=0, help="フレーム先頭の読み飛ばしバイト数 (通常不要)")
     parser.add_argument("--timeout", type=int, default=120, help="受信タイムアウト秒 (デフォルト: 120)")

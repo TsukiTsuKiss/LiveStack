@@ -39,17 +39,20 @@ from hist_overlay import draw_hist_ccdf_overlay
 from display_utils import clamp, draw_info_lines, fit_display_frame, get_screen_size
 from raw_utils import (
     BAYER_MAP,
+    apply_wire_format_preset,
     apply_gamma_correction,
     apply_white_balance,
     calc_candidates,
     compute_wb_gains_from_patch,
     decode_to_raw16,
     min_stride_for_bits,
+    normalize_effective_raw16,
     parse_tcp_source,
     probe_format,
     raw16_to_bgr8,
     raw16_to_bgr8_stretched,
     recv_exact,
+    resolve_effective_bits_and_shift,
 )
 
 
@@ -63,6 +66,16 @@ def run_raw_live_view(args):
     raw_w = args.raw_width if args.raw_width is not None else args.width
     raw_h = args.raw_height if args.raw_height is not None else args.height
     crop = (raw_w != args.width or raw_h != args.height)
+
+    preset_info = apply_wire_format_preset(args, raw_w)
+    if preset_info is not None:
+        if args.wire_format == "12p":
+            print(f"[preset] wire-format=12p -> bits={preset_info['bits']} stride={preset_info['stride']}")
+        else:
+            print(
+                f"[preset] wire-format={args.wire_format} -> bits={preset_info['bits']} "
+                f"stride={preset_info['stride']} (effective_bits={preset_info['effective_bits']})"
+            )
 
     print(f"[RAW] 接続先: {args.source}")
     print(f"[RAW] 表示解像度: {args.width}x{args.height}")
@@ -101,6 +114,14 @@ def run_raw_live_view(args):
         else:
             fmt, candidates, first_frame_bytes, buf = probe_format(sock, raw_w, raw_h, args.bits)
             fmt_idx = candidates.index(fmt)
+
+        effective_info = resolve_effective_bits_and_shift(args, fmt, raw_w, raw_h, first_frame_bytes)
+        effective_bits = effective_info["effective_bits"]
+        effective_shift = effective_info["effective_shift"]
+        if effective_info["message"]:
+            print(effective_info["message"])
+        fmt["effective_bits"] = effective_bits
+        fmt["effective_shift"] = effective_shift
 
         skip = args.skip
         auto_stretch = not args.no_stretch
@@ -189,13 +210,14 @@ def run_raw_live_view(args):
                 raw16 = decode_to_raw16(payload, fmt, raw_w, raw_h)
                 if crop:
                     raw16 = raw16[:args.height, :args.width]
+                raw16 = normalize_effective_raw16(raw16, fmt["bits"], effective_bits, effective_shift)
 
-                bgr = raw16_to_bgr8(raw16, fmt["bits"], bayer_code)
+                bgr = raw16_to_bgr8(raw16, effective_bits, bayer_code)
                 if auto_stretch:
                     bgr_disp, s_lo, s_hi = raw16_to_bgr8_stretched(raw16, bayer_code)
                 else:
                     bgr_disp = bgr
-                    s_lo, s_hi = 0.0, float((1 << fmt["bits"]) - 1)
+                    s_lo, s_hi = 0.0, float((1 << effective_bits) - 1)
 
                 if not syncing_wb_trackbar["active"]:
                     wb_gains[0] = slider_to_gain(max(10, cv2.getTrackbarPos("B x100", WB_WINDOW_NAME)))
@@ -227,11 +249,15 @@ def run_raw_live_view(args):
                 f"{fmt['name'].strip()} | Bayer:{bayer_name} | {stretch_label}",
                 f"WB B:{wb_gains[0]:.2f} G:{wb_gains[1]:.2f} R:{wb_gains[2]:.2f} | Gamma:{gamma_value:.2f} ({'KEY' if gamma_adjust_mode else 'GUI'}) | click:{'ON' if click_wb_mode else 'OFF'}",
             ]
+            if args.wire_format in ("12u", "10u"):
+                lines.append(
+                    f"{args.wire_format} decode: effective={effective_bits}bit (>>{effective_shift})"
+                )
             if last_raw16 is not None:
                 vmin = int(last_raw16.min())
                 vmax = int(last_raw16.max())
                 vmean = float(last_raw16.mean())
-                lines.append(f"min={vmin}  max={vmax}  mean={vmean:.1f}  (max={(1 << fmt['bits']) - 1})")
+                lines.append(f"min={vmin}  max={vmax}  mean={vmean:.1f}  (max={(1 << effective_bits) - 1})")
                 if auto_stretch:
                     lines.append(f"stretch[{s_lo:.0f} - {s_hi:.0f}]")
                 print(f"[frame#{frame_count}] {'  '.join(lines[3:])}")
@@ -251,7 +277,7 @@ def run_raw_live_view(args):
                     disp,
                     brightness_threshold=255,
                     stop_ratio=0.10,
-                    bits=fmt["bits"],
+                    bits=effective_bits,
                     native_source=hist_native,
                 )
 
@@ -310,6 +336,11 @@ def run_raw_live_view(args):
             elif key == ord("n"):
                 fmt_idx = (fmt_idx + 1) % len(candidates)
                 fmt = candidates[fmt_idx]
+                effective_info = resolve_effective_bits_and_shift(args, fmt, raw_w, raw_h, frame_bytes)
+                effective_bits = effective_info["effective_bits"]
+                effective_shift = effective_info["effective_shift"]
+                if effective_info["message"]:
+                    print(effective_info["message"])
                 print(f"[switch] フォーマット: {fmt['name'].strip()}")
                 buf.clear()
             elif key == ord("+") or key == ord("="):
@@ -361,6 +392,9 @@ def build_arg_parser():
     parser.add_argument("--raw-width", type=int, default=None, help="実センサーRAW幅 (省略時=--width。例: IMX678=3856)")
     parser.add_argument("--raw-height", type=int, default=None, help="実センサーRAW高さ (省略時=--height。例: IMX678=2180)")
     parser.add_argument("--stride", type=int, default=None, help="1行あたりのバイト数を直接指定 (例: IMX678=5792)")
+    parser.add_argument("--wire-format", type=str, default=None, choices=["12p", "12u", "10u"], help="送信側ワイヤ形式プリセット。12p=12bit packed, 12u/10u=unpacked(16bit容器)")
+    parser.add_argument("--u12-shift", type=str, default="auto", choices=["auto", "0", "4"], help="--wire-format 12u 時の有効12bit位置。auto=自動判定, 0=LSB詰め, 4=MSB詰め(>>4)")
+    parser.add_argument("--u10-shift", type=str, default="auto", choices=["auto", "0", "6"], help="--wire-format 10u 時の有効10bit位置。auto=自動判定, 0=LSB詰め, 6=MSB詰め(>>6)")
     parser.add_argument("--bits", type=int, default=None, choices=[8, 10, 12, 16], help="ビット深度を強制指定 (未指定=自動推定)")
     parser.add_argument("--bayer", type=str, default="BGGR", choices=list(BAYER_MAP.keys()), help="Bayerパターン (デフォルト: BGGR / IMX678確認済み)")
     parser.add_argument("--skip", type=int, default=0, help="フレーム先頭の読み飛ばしバイト数 (通常不要)")

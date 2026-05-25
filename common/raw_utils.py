@@ -152,6 +152,108 @@ def decode_to_raw16(frame_bytes, fmt, width, height):
     raise ValueError(f"未対応ビット数: {bits}")
 
 
+def apply_wire_format_preset(args, raw_width):
+    """wire-formatプリセットに応じて args.bits / args.stride を補完・検証する。"""
+    wire_format = getattr(args, "wire_format", None)
+    if wire_format is None:
+        return None
+
+    if wire_format == "12p":
+        expected_bits = 12
+        expected_min_stride = min_stride_for_bits(raw_width, 12)
+    elif wire_format == "12u":
+        expected_bits = 16
+        expected_min_stride = min_stride_for_bits(raw_width, 16)
+    elif wire_format == "10u":
+        expected_bits = 16
+        expected_min_stride = min_stride_for_bits(raw_width, 16)
+    else:
+        raise ValueError(f"未対応の wire-format: {wire_format}")
+
+    if getattr(args, "bits", None) is None:
+        args.bits = expected_bits
+    elif int(args.bits) != expected_bits:
+        raise ValueError(
+            f"--wire-format {wire_format} では --bits {expected_bits} が必要です (指定: {args.bits})"
+        )
+
+    if getattr(args, "stride", None) is None:
+        args.stride = expected_min_stride
+    elif int(args.stride) < expected_min_stride:
+        raise ValueError(
+            f"--wire-format {wire_format} では stride>={expected_min_stride} が必要です (指定: {args.stride})"
+        )
+
+    return {
+        "wire_format": wire_format,
+        "bits": int(args.bits),
+        "stride": int(args.stride),
+        "effective_bits": 12 if wire_format == "12u" else (10 if wire_format == "10u" else int(args.bits)),
+    }
+
+
+def resolve_effective_bits_and_shift(args, fmt, width, height, first_frame_bytes):
+    """wire-format設定から有効ビット深度とシフト量を決定する。"""
+    wire_format = getattr(args, "wire_format", None)
+    if wire_format == "12u":
+        effective_bits = 12
+        manual_shift = getattr(args, "u12_shift", "auto")
+        manual_choices = ("0", "4")
+        low_mask = 0x000F
+        high_mask = 0xF000
+        auto_tag = "u12"
+        msb_shift = 4
+    elif wire_format == "10u":
+        effective_bits = 10
+        manual_shift = getattr(args, "u10_shift", "auto")
+        manual_choices = ("0", "6")
+        low_mask = 0x003F
+        high_mask = 0xFC00
+        auto_tag = "u10"
+        msb_shift = 6
+    else:
+        return {
+            "effective_bits": int(fmt["bits"]),
+            "effective_shift": 0,
+            "message": None,
+        }
+
+    if manual_shift in manual_choices:
+        return {
+            "effective_bits": effective_bits,
+            "effective_shift": int(manual_shift),
+            "message": f"[{auto_tag}] 有効ビット位置を手動指定: >>{int(manual_shift)}",
+        }
+
+    sample16 = decode_to_raw16(first_frame_bytes, fmt, width, height)
+    low_zero_ratio = float(np.mean((sample16 & low_mask) == 0))
+    high_zero_ratio = float(np.mean((sample16 & high_mask) == 0))
+    if low_zero_ratio > 0.98 and high_zero_ratio < 0.98:
+        effective_shift = msb_shift
+    elif high_zero_ratio > 0.98 and low_zero_ratio < 0.98:
+        effective_shift = 0
+    else:
+        effective_shift = msb_shift if low_zero_ratio >= high_zero_ratio else 0
+
+    return {
+        "effective_bits": effective_bits,
+        "effective_shift": effective_shift,
+        "message": (
+            f"[{auto_tag}] auto判定: shift=>>{effective_shift} "
+            f"(low=0 ratio={low_zero_ratio:.3f}, high=0 ratio={high_zero_ratio:.3f})"
+        ),
+    }
+
+
+def normalize_effective_raw16(raw16, fmt_bits, effective_bits, effective_shift):
+    """16bitコンテナ入力時に有効ビットへ正規化する。"""
+    if int(fmt_bits) == 16 and int(effective_bits) < 16:
+        if int(effective_shift) > 0:
+            raw16 = raw16 >> int(effective_shift)
+        raw16 = raw16 & ((1 << int(effective_bits)) - 1)
+    return raw16
+
+
 def raw16_to_bgr8(raw16, bits, bayer_code):
     shift = bits - 8
     bayer8 = np.clip(raw16 >> shift, 0, 255).astype(np.uint8)
