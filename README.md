@@ -43,6 +43,7 @@ camera-live/
 ├── raw_live_view.py      # rpicam-raw TCP受信専用プレビュー
 ├── live_stack.py         # LiveStack機能付きプレビュー（カメラ直結/URL対応）
 ├── raw_live_stack.py     # rpicam-raw TCP受信 + LiveStack（RAW専用）
+├── 動作実績.md            # 機材ごとの送受信コマンド実績
 ├── common/
 │   ├── camera_config.py  # 共通カメラ設定
 │   ├── display_utils.py  # 表示ユーティリティ
@@ -50,6 +51,11 @@ camera-live/
 │   └── raw_utils.py      # RAW受信・デコード・WB/ガンマ共通処理
 └── README.md
 ```
+
+## 関連ドキュメント
+
+- [仕様.md](仕様.md): wire-format / 判定仕様 / UI仕様
+- [動作実績.md](動作実績.md): 機材・解像度ごとの動作確認コマンド集
 
 ## アプリケーション
 
