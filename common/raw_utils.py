@@ -97,7 +97,10 @@ def calc_candidates(width, height):
         candidates.append(dict(name="12bit CSI2P+pad", bits=12, stride=stride_aligned, frame_size=stride_aligned * h))
 
     stride = w * 2
+    stride_aligned = _align32(stride)
     candidates.append(dict(name="16bit SRGGB16   ", bits=16, stride=stride, frame_size=stride * h))
+    if stride_aligned != stride:
+        candidates.append(dict(name="16bit SRGGB16+pad", bits=16, stride=stride_aligned, frame_size=stride_aligned * h))
     return candidates
 
 
@@ -148,7 +151,8 @@ def decode_to_raw16(frame_bytes, fmt, width, height):
     if bits == 12:
         return unpack_12bit_csi2p(frame_bytes, width, height, stride)
     if bits == 16:
-        return np.frombuffer(frame_bytes, dtype=np.uint16).reshape(height, width)
+        raw16 = np.frombuffer(frame_bytes, dtype=np.uint16).reshape(height, stride // 2)
+        return raw16[:, :width]
     raise ValueError(f"未対応ビット数: {bits}")
 
 
@@ -160,13 +164,16 @@ def apply_wire_format_preset(args, raw_width):
 
     if wire_format == "12p":
         expected_bits = 12
-        expected_min_stride = min_stride_for_bits(raw_width, 12)
+        expected_min_stride = _align32(min_stride_for_bits(raw_width, 12))
     elif wire_format == "12u":
         expected_bits = 16
-        expected_min_stride = min_stride_for_bits(raw_width, 16)
+        expected_min_stride = _align32(min_stride_for_bits(raw_width, 16))
     elif wire_format == "10u":
         expected_bits = 16
-        expected_min_stride = min_stride_for_bits(raw_width, 16)
+        expected_min_stride = _align32(min_stride_for_bits(raw_width, 16))
+    elif wire_format == "16u":
+        expected_bits = 16
+        expected_min_stride = _align32(min_stride_for_bits(raw_width, 16))
     else:
         raise ValueError(f"未対応の wire-format: {wire_format}")
 

@@ -833,7 +833,9 @@ def run_raw_live_stack(args):
 
     raw_w = args.raw_width if args.raw_width is not None else args.width
     raw_h = args.raw_height if args.raw_height is not None else args.height
-    crop = (raw_w != args.width or raw_h != args.height)
+    crop_x = args.crop_x
+    crop_y = args.crop_y
+    crop = (raw_w != args.width or raw_h != args.height or crop_x != 0 or crop_y != 0)
 
     preset_info = apply_wire_format_preset(args, raw_w)
     if preset_info is not None:
@@ -848,10 +850,10 @@ def run_raw_live_stack(args):
     print(f"[RAW] 接続先: {args.source}")
     print(f"[RAW] 表示解像度: {args.width}x{args.height}")
     if crop:
-        print(f"[RAW] RAW解像度: {raw_w}x{raw_h} (デコード後クロップ)")
+        print(f"[RAW] RAW解像度: {raw_w}x{raw_h} (デコード後クロップ: x={crop_x} y={crop_y} {args.width}x{args.height})")
     print(f"[RAW] Bayer: {args.bayer}  ビット: {'自動' if args.bits is None else args.bits}")
-    if args.wire_format in ("12u", "10u"):
-        effective_text = "12" if args.wire_format == "12u" else "10"
+    if args.wire_format in ("12u", "10u", "16u"):
+        effective_text = {"12u": "12", "10u": "10", "16u": "16"}[args.wire_format]
         print(f"[RAW] wire-format={args.wire_format} を有効化: 受信コンテナ16bit / 有効ビット{effective_text}bit として処理します")
     if args.stride:
         print(f"[RAW] stride: {args.stride} bytes/行")
@@ -1077,7 +1079,7 @@ def run_raw_live_stack(args):
                 payload = frame_bytes[skip:skip + fmt["frame_size"]]
                 raw16 = decode_to_raw16(payload, fmt, raw_w, raw_h)
                 if crop:
-                    raw16 = raw16[:args.height, :args.width]
+                    raw16 = raw16[crop_y:crop_y + args.height, crop_x:crop_x + args.width]
                 raw16 = normalize_effective_raw16(raw16, fmt["bits"], effective_bits, effective_shift)
 
                 # スタック用: ストレッチなし・生のデベイヤ画像
@@ -1170,7 +1172,7 @@ def run_raw_live_stack(args):
                     f"{args.source}  {src_w}x{src_h}  frame#{frame_count}",
                     f"{fmt['name'].strip()} | Bayer:{bayer_name} | {stretch_label} | Stack:{'ON' if stack_enabled else 'OFF'}",
                 ]
-                if args.wire_format in ("12u", "10u"):
+                if args.wire_format in ("12u", "10u", "16u"):
                     lines.append(
                         f"{args.wire_format} decode: effective={effective_bits}bit (>>{effective_shift})"
                     )
@@ -1505,8 +1507,10 @@ def build_arg_parser():
     parser.add_argument("--height", type=int, default=2160, help="表示/クロップ高さ (デフォルト: 2160)")
     parser.add_argument("--raw-width", type=int, default=None, help="実センサーRAW幅 (省略時=--width。例: IMX678=3856)")
     parser.add_argument("--raw-height", type=int, default=None, help="実センサーRAW高さ (省略時=--height。例: IMX678=2180)")
+    parser.add_argument("--crop-x", type=int, default=0, help="クロップ開始X座標 (デフォルト: 0)")
+    parser.add_argument("--crop-y", type=int, default=0, help="クロップ開始Y座標 (デフォルト: 0)")
     parser.add_argument("--stride", type=int, default=None, help="1行あたりのバイト数を直接指定 (例: IMX678=5792)")
-    parser.add_argument("--wire-format", type=str, default=None, choices=["12p", "12u", "10u"], help="送信側ワイヤ形式プリセット。12p=12bit packed, 12u/10u=unpacked(16bit容器)")
+    parser.add_argument("--wire-format", type=str, default=None, choices=["12p", "12u", "10u", "16u"], help="送信側ワイヤ形式プリセット。12p=12bit packed, 12u/10u=unpacked(16bit容器), 16u=16bit真値")
     parser.add_argument("--u12-shift", type=str, default="auto", choices=["auto", "0", "4"], help="--wire-format 12u 時の有効12bit位置。auto=自動判定, 0=LSB詰め, 4=MSB詰め(>>4)")
     parser.add_argument("--u10-shift", type=str, default="auto", choices=["auto", "0", "6"], help="--wire-format 10u 時の有効10bit位置。auto=自動判定, 0=LSB詰め, 6=MSB詰め(>>6)")
     parser.add_argument("--bits", type=int, default=None, choices=[8, 10, 12, 16], help="ビット深度を強制指定 (未指定=自動推定)。迷う場合は --wire-format を優先")
