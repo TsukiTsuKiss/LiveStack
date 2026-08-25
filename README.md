@@ -366,6 +366,17 @@ pip install -r requirements.txt
 
 ## 変更履歴
 
+#### 2026/08/25 SSH連携によるrpicam-raw自動起動
+- **SSH連携実装**: `--ssh-host`/`--ssh-user`/`--ssh-key`/`--rpicam-cmd` でPC側で1コマンドでPiのrpicam-rawを自動起動・停止。鍵認証のみ対応。
+- **`--no-ssh`フラグ**: JSONに `ssh_host` があってもコマンドライン指定で手動起動モードに切り替え可能。
+- **`--source`自動導出**: `--ssh-host` 定義時に `--source` 未指定なら `tcp://{ssh_host}:8888` を自動設定。
+- **EXIF強化**: `--rpicam-cmd` から `--shutter`/`--gain` をパースしてJPEG `ExposureTime`・`UserComment`に埋め込む。
+- **`imx585.json`作成**: SSH設定を含むプロファイル。ワンコマンド起動用。
+
+#### 2026/08/25 live_view.py / raw_live_view.py 削除
+- **ビューワーファイル削除**: `live_stack.py` / `raw_live_stack.py` の機能が上位互換なため不要になった `live_view.py` と `raw_live_view.py` を削除。
+- **ドキュメント整理**: 機能比較表が2スクリプト構成に更新。各ドキュメントから削除済ファイルへの参照を除去。
+
 #### 2026/08/25 raw_live_stack.py: Max Frames メモリ連動クランプ
 - **`--max-frames` クランプ追加**: 解像度とOS利用可能メモリ（safety_ratio=0.5）から安全上限を自動計算。`--max-frames` が上限超過時は警告を表示しクランプする。デフォルト値100は変更なし。
 - **メニュー表示変更**: Max Framesの表示を `Stack:N  (MemMax:M)` 形式に変更し、現在値と計算上限を同時表示。
