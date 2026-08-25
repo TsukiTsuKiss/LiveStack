@@ -298,7 +298,7 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - **Size**: カメラごとの利用可能解像度一覧（例: `640x480`、`1456x1088`）から選択
 - **Gain**: 1.0～8.0（0.5刻み） - カメラの感度調整
 - **Exposure**: 10秒～1/2000秒（15段階） - 露出時間、天体撮影向けの長時間露出対応
-- **Max Frames**: 1～100（1列み） - スタッキングに使用する最大フレーム数（起動時に`--max-frames`オプションで初期値を変更可）
+- **Max Frames**: 1～メモリ計算上限（1刺み） - スタッキングに使用する最大フレーム数。`raw_live_stack.py` では起動時の解像度とOS利用可能メモリから上限を自動計算（起動時に `--max-frames` で指定した値もクランプされる）。メニュー表示は `Stack:N  (MemMax:M)` 形式
 - **Stack Mode**: ON/OFF - LiveStackモードの切り替え
 - **Info Display**: ON/OFF - 画面上の情報表示切り替え
 - **Stop Threshold**: 5～255（5刻み） - 「閾値を超えた画素」を判定する輝度しきい値
@@ -481,6 +481,11 @@ pip install astropy Pillow piexif opencv-python picamera2
 ```
 
 ## 変更履歴
+
+#### 2026/08/25 raw_live_stack.py: Max Frames メモリ連動クランプ
+- **`--max-frames` クランプ追加**: 解像度とOS利用可能メモリ（safety_ratio=0.5）から安全上限を自動計算。`--max-frames` が上限超過時は警告を表示しクランプする。デフォルト値100は変更なし。
+- **メニュー表示変更**: Max Framesの表示を `Stack:N  (MemMax:M)` 形式に変更し、現在値と計算上限を同時表示。
+- **`common/raw_utils.py` 拡張**: `get_available_memory_bytes()` / `estimate_max_frames_limit()` 追加。Windows（ctypes）およびLinux（/proc/meminfo）に対応。psutil不要。
 
 #### 2026/08/25 raw_live_stack.py: フリップ機能追加・キー割当統一
 - **フリップ機能追加**: `raw_live_stack.py` に `--flip-h`/`--flip-v` 引数と `[h]`/`[v]` キートグルを追加（`live_stack.py` と同様の仕様）

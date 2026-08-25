@@ -56,6 +56,7 @@ from raw_utils import (
     calc_candidates,
     compute_wb_gains_from_patch,
     decode_to_raw16,
+    estimate_max_frames_limit,
     min_stride_for_bits,
     normalize_effective_raw16,
     parse_tcp_source,
@@ -682,6 +683,8 @@ class SettingsMenu:
                 value_text = f"{int(setting['value'])}%"
             elif setting["name"] == "Stop Threshold":
                 value_text = f"{int(setting['value'])}"
+            elif setting["name"] == "Max Frames" and "max" in setting:
+                value_text = f"Stack:{int(setting['value'])}  (MemMax:{int(setting['max'])})"
             elif setting["name"] == "Gain":
                 value_text = f"{setting['value']:.1f}"
             else:
@@ -917,7 +920,12 @@ def run_raw_live_stack(args):
         bayer_code = BAYER_MAP[bayer_keys[bayer_idx]]
 
         stack_enabled = False
-        live_stack = LiveStack(max_frames=args.max_frames, verbose=False, bits=effective_bits)
+        # 利用可能メモリと解像度からmax_framesの安全上限を見積もり、--max-framesをクランプする
+        max_frames_limit = estimate_max_frames_limit(raw_w, raw_h)
+        max_frames = min(args.max_frames, max_frames_limit)
+        if max_frames < args.max_frames:
+            print(f"[warn] --max-frames {args.max_frames} はメモリ見積もり上限を超えるため {max_frames} にクランプしました")
+        live_stack = LiveStack(max_frames=max_frames, verbose=False, bits=effective_bits)
 
         settings_menu = SettingsMenu()
         stream_menu_names = {"Max Frames", "Stack Mode", "Info Display", "Stop Threshold", "Stop Ratio(%)"}        
@@ -929,12 +937,17 @@ def run_raw_live_stack(args):
                 _s["value"] = max_val
                 _s["step"] = max(1, max_val // 100)
                 break
+        # Max Frames の上限もメモリ見積もりに合わせて更新（メニュー操作でのクランプと矛盾させない）
+        for _s in settings_menu.settings:
+            if _s["name"] == "Max Frames":
+                _s["max"] = max_frames_limit
+                break
         settings_menu.settings = [s for s in settings_menu.settings if s["name"] in stream_menu_names]
         settings_menu.set_current_values(
             camera=0,
             gain=1.0,
             exposure=16667,
-            max_frames=args.max_frames,
+            max_frames=max_frames,
             stack_mode=False,
             info_display=True,
             size_label="N/A",

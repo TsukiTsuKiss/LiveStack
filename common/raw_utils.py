@@ -4,6 +4,7 @@ RAW TCP ストリーム共通ユーティリティ
 raw_live_view.py / raw_live_stack.py で共通利用する関数・定数をまとめたモジュール。
 """
 
+import sys
 import time
 
 import cv2
@@ -334,6 +335,60 @@ def parse_tcp_source(source):
     if not parsed.port:
         raise ValueError(f"ポートが指定されていません: {source}")
     return parsed.hostname, parsed.port
+
+
+# ---------------------------------------------------------------------------
+# メモリ見積もり
+# ---------------------------------------------------------------------------
+
+def get_available_memory_bytes():
+    """OSの利用可能メモリをbyte単位で返す。取得できない場合はNone。"""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            stat = MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                return int(stat.ullAvailPhys)
+            return None
+        else:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemAvailable:"):
+                        return int(line.split()[1]) * 1024
+            return None
+    except Exception:
+        return None
+
+
+def estimate_max_frames_limit(width, height, safety_ratio=0.5, bytes_per_pixel=2, buffer_count=2, fallback=500):
+    """解像度と利用可能メモリから安全な max_frames 上限を見積もる。
+
+    raw16バッファ + ダークバッファ(同枚数)がそれぞれ width*height*bytes_per_pixel を占有する前提。
+    利用可能メモリを取得できない場合は fallback を返す。
+    """
+    available = get_available_memory_bytes()
+    if available is None or width <= 0 or height <= 0:
+        return fallback
+    per_frame_bytes = width * height * bytes_per_pixel * buffer_count
+    if per_frame_bytes <= 0:
+        return fallback
+    limit = int((available * safety_ratio) // per_frame_bytes)
+    return max(1, limit)
 
 
 # ---------------------------------------------------------------------------
