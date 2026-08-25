@@ -26,6 +26,7 @@ rpicam-raw TCP生ストリーム専用ライブビュー
 """
 
 import argparse
+import json
 import os
 import socket
 import sys
@@ -404,12 +405,57 @@ def build_arg_parser():
     parser.add_argument("--skip", type=int, default=0, help="フレーム先頭の読み飛ばしバイト数 (通常不要)")
     parser.add_argument("--timeout", type=int, default=120, help="受信タイムアウト秒 (デフォルト: 120)")
     parser.add_argument("--no-stretch", action="store_true", help="自動ストレッチを無効化 (デフォルト: ストレッチ有効)")
+    parser.add_argument("--config", type=str, nargs="?", const="config.json", default=None,
+                        help="JSON設定ファイルのパス。値省略時は config.json を使用")
+    parser.add_argument("--save-config", type=str, default=None,
+                        help="実効設定をJSONに保存して終了")
     return parser
 
 
+def _load_config(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[config] 読み込み失敗: {path}  ({e})")
+        return {}
+
+
+def _save_config(path, args):
+    exclude = {"config", "save_config"}
+    d = {k: v for k, v in vars(args).items() if k not in exclude}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=2)
+    print(f"[config] 保存: {path}")
+
+
 def main():
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", nargs="?", const="config.json", default=None)
+    pre.add_argument("--save-config", default=None)
+    pre_args, _ = pre.parse_known_args()
+
     parser = build_arg_parser()
+
+    if pre_args.config:
+        cfg = _load_config(pre_args.config)
+        if cfg:
+            if "source" in cfg:
+                for action in parser._actions:
+                    if action.dest == "source":
+                        action.required = False
+            parser.set_defaults(**cfg)
+            print(f"[config] 読み込み: {pre_args.config}")
+
     args = parser.parse_args()
+
+    if args.source is None:
+        parser.error("--source または --config に source を指定してください")
+
+    if args.save_config:
+        _save_config(args.save_config, args)
+        return
+
     run_raw_live_view(args)
 
 
