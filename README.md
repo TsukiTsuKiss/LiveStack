@@ -23,6 +23,7 @@ Raspberry Pi Camera2用のリアルタイムプレビューアプリケーショ
 | **ガンマ補正** | × | × | 〇 | 〇 |
 | **自動ストレッチ** | × | × | 〇 | 〇 |
 | **ヒストグラム+CCDF** | 〇 | 〇 | 〇 | 〇 |
+| **フリップ（H/V）** | × | 〇 | × | 〇 |
 | **PNG保存** | 〇 | 〇 | 〇 | 〇 |
 | **JPEG保存** | × | 〇 | × | × |
 | **FITS保存** | × | 〇 | × | 〇 |
@@ -174,7 +175,7 @@ python raw_live_view.py --source tcp://192.168.1.17:8888 \
 - `b`: Bayerパターン切り替え（RGGB→BGGR→GRBG→GBRG）
 - `n`: 次のフォーマット候補に切り替え
 - `+` / `-`: skip ±1ストライド
-- `h`: ヒストグラム+CCDFオーバーレイ ON/OFF
+- `H`: ヒストグラム+CCDFオーバーレイ ON/OFF
 - `w`: 白点クリックWB ON/OFF
 - `W`: WBリセット（B/G/R=1.00）
 - `g`: ガンマ調整モード ON/OFF（左右キーで変更）
@@ -242,7 +243,9 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - `s`: PNG保存（WB/ガンマ適用後、フルサイズ）
 - `f`: FITS保存（uint16、スタック平均値）
 - `r`: NPY保存（16bit RAW）
-- `h`: ヒストグラム+CCDF ON/OFF
+- `h`: 左右反転 ON/OFF
+- `v`: 上下反転 ON/OFF
+- `H`: ヒストグラム+CCDF ON/OFF
 - `a`: 自動ストレッチ ON/OFF
 - `b`: Bayerパターン切り替え
 - `n`: 次のフォーマット候補
@@ -478,6 +481,10 @@ pip install astropy Pillow piexif opencv-python picamera2
 ```
 
 ## 変更履歴
+
+#### 2026/08/25 raw_live_stack.py: フリップ機能追加・キー割当統一
+- **フリップ機能追加**: `raw_live_stack.py` に `--flip-h`/`--flip-v` 引数と `[h]`/`[v]` キートグルを追加（`live_stack.py` と同様の仕様）
+- **キー割当変更**: `raw_live_stack.py`/`raw_live_view.py` のヒストグラム切替キーを `[h]` から `[H]` に変更（`[h]`はフリップ用と衝突するため）
 
 #### 2026/05/19 raw_live_stack.py: スレッド分離・パフォーマンス改善
 - **スタックスレッド分離**: `process_stack` をバックグラウンドスレッド化し、重い計算中でもキー入力・表示が止まらないよう改善

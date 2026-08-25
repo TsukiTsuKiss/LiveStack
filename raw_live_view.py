@@ -18,7 +18,7 @@ rpicam-raw TCP生ストリーム専用ライブビュー
     [+/-] skip ±1行
     [a] 自動ストレッチ ON/OFF
     [b] Bayerパターン切替
-    [h] ヒストグラム ON/OFF
+    [H] ヒストグラム ON/OFF
     [w] 白点クリックWB ON/OFF
     [W] WBリセット (B/G/R=1.0)
     [g] ガンマ調整モード ON/OFF（左右キーで変更）
@@ -199,7 +199,7 @@ def run_raw_live_view(args):
 
         cv2.setMouseCallback(PREVIEW_WINDOW_NAME, on_mouse)
 
-        print("\n操作: [q]終了  [s]PNG保存  [r]NPY保存  [n]次候補フォーマット  [+/-]skip±1行  [a]ストレッチ切替  [b]Bayer切替  [h]ヒストグラム切替  [w]白点WB  [W]WBリセット  [g]ガンマ調整モード  [G]ガンマリセット")
+        print("\n操作: [q]終了  [s]PNG保存  [r]NPY保存  [n]次候補フォーマット  [+/-]skip±1行  [a]ストレッチ切替  [b]Bayer切替  [H]ヒストグラム切替  [w]白点WB  [W]WBリセット  [g]ガンマ調整モード  [G]ガンマリセット")
 
         frame_count = 0
         last_raw16 = None
@@ -300,7 +300,7 @@ def run_raw_live_view(args):
             elif key == ord("a"):
                 auto_stretch = not auto_stretch
                 print(f"[stretch] {'ON' if auto_stretch else 'OFF'}")
-            elif key == ord("h"):
+            elif key == ord("H"):
                 show_hist = not show_hist
                 print(f"[hist] ヒストグラム: {'ON' if show_hist else 'OFF'}")
             elif key == ord("w"):

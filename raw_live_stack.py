@@ -22,7 +22,9 @@ rpicam-raw TCP生ストリーム専用ライブスタック
     [+/-] skip ±1行
     [a] 自動ストレッチ ON/OFF
     [b] Bayerパターン切替
-    [h] ヒストグラム ON/OFF
+    [h] 左右反転 ON/OFF
+    [v] 上下反転 ON/OFF
+    [H] ヒストグラム ON/OFF
     [t] LiveStack ON/OFF
     [R] LiveStackリセット
     [w] 白点クリックWB ON/OFF
@@ -908,6 +910,8 @@ def run_raw_live_stack(args):
         auto_stretch = not args.no_stretch
         show_hist = True
         info_display = True
+        flip_h = args.flip_h
+        flip_v = args.flip_v
         bayer_keys = list(BAYER_MAP.keys())
         bayer_idx = bayer_keys.index(args.bayer)
         bayer_code = BAYER_MAP[bayer_keys[bayer_idx]]
@@ -997,7 +1001,7 @@ def run_raw_live_stack(args):
         print("\n操作: [q]終了  [m]設定メニュー  [i]情報表示  [s]PNG保存  [r]NPY保存  [f]FITS保存")
         print("       [n]次候補フォーマット  [+/-]skip±1行  [a]ストレッチ切替  [b]Bayer切替")
         print("       [o]停止判定モード切替（超過フレームを含む/含まない）")
-        print("       [h]ヒストグラム切替  [t]LiveStack ON/OFF  [R]LiveStackリセット")
+        print("       [h]左右反転  [v]上下反転  [H]ヒストグラム切替  [t]LiveStack ON/OFF  [R]LiveStackリセット")
         print("       [w]白点クリックWB  [W]WBリセット  [g]ガンマ調整モード  [G]ガンマリセット")
         print("       [d]ダークフレーム取得（レンズキャップして押す）  [D]ダーククリア")
         print("       [S]SER録画開始/停止トグル")
@@ -1137,6 +1141,16 @@ def run_raw_live_stack(args):
             else:
                 save_frame = bgr_disp.copy()
                 display_frame = bgr_disp.copy()
+
+            if flip_h and flip_v:
+                save_frame = cv2.flip(save_frame, -1)
+                display_frame = cv2.flip(display_frame, -1)
+            elif flip_h:
+                save_frame = cv2.flip(save_frame, 1)
+                display_frame = cv2.flip(display_frame, 1)
+            elif flip_v:
+                save_frame = cv2.flip(save_frame, 0)
+                display_frame = cv2.flip(display_frame, 0)
 
             # Now表示とCCDF描画で同じ母集団を使うため、ここでネイティブ統計配列を1回だけ確定する。
             native_stats = None
@@ -1417,6 +1431,12 @@ def run_raw_live_stack(args):
                 auto_stretch = not auto_stretch
                 print(f"[stretch] {'ON' if auto_stretch else 'OFF'}")
             elif key == ord("h"):
+                flip_h = not flip_h
+                print(f"左右反転: {'ON' if flip_h else 'OFF'}")
+            elif key == ord("v"):
+                flip_v = not flip_v
+                print(f"上下反転: {'ON' if flip_v else 'OFF'}")
+            elif key == ord("H"):
                 show_hist = not show_hist
                 print(f"[hist] ヒストグラム: {'ON' if show_hist else 'OFF'}")
             elif key == ord("t"):
@@ -1520,6 +1540,8 @@ def build_arg_parser():
     parser.add_argument("--no-stretch", action="store_true", help="自動ストレッチを無効化 (デフォルト: ストレッチ有効)")
     parser.add_argument("--max-frames", type=int, default=100, help="LiveStack最大フレーム数 (デフォルト: 100)")
     parser.add_argument("--ser-lsb", action="store_true", help="SER書き出しを下位詰め(LSB-aligned)にする (デフォルト: 上位詰めMSB-aligned)")
+    parser.add_argument("--flip-h", action="store_true", help="左右反転して起動")
+    parser.add_argument("--flip-v", action="store_true", help="上下反転して起動")
     return parser
 
 
