@@ -4,6 +4,7 @@ opencv-contrib-python>=4.13
 astropy>=7.0
 piexif>=1.1
 Pillow>=12.0
+paramiko>=5.0
 
 # Raspberry Pi 側のみ必要（PC環境では不要）
 # picamera2
