@@ -1,6 +1,7 @@
 # Camera Live Applications
 
-Raspberry Pi Camera2用のリアルタイムプレビューアプリケーション
+> **淡い天体を実況したい** ―― Raspberry Pi + PC によるRAWライブスタックアプリ群。
+> rpicam-raw の生ストリームをTCP経由でPCに受け、12bit RAWデベイヤ・加算スタック・ダーク減算・WB・FITS/SER保存までをリアルタイムで行う。Windows / Linux 対応。
 
 ## 目的
 
@@ -25,7 +26,7 @@ Raspberry Pi Camera2用のリアルタイムプレビューアプリケーショ
 | **ヒストグラム+CCDF** | 〇 | 〇 | 〇 | 〇 |
 | **フリップ（H/V）** | × | 〇 | × | 〇 |
 | **PNG保存** | 〇 | 〇 | 〇 | 〇 |
-| **JPEG保存** | × | 〇 | × | × |
+| **JPEG保存** | × | 〇 | × | 〇 |
 | **FITS保存** | × | 〇 | × | 〇 |
 | **NPY(RAW16)保存** | × | × | 〇 | 〇 |
 | **SER録画** | × | × | × | 〇 |
@@ -240,7 +241,8 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - `i`: 情報表示 ON/OFF
 - `t`: LiveStack ON/OFF
 - `R`: LiveStackリセット
-- `s`: PNG保存（WB/ガンマ適用後、フルサイズ）
+- `s`: PNG保存（WB/ガンマ適用後、フルサイズ、tEXtメタデータ付き）
+- `j`: JPEG保存（WB/ガンマ適用後、フルサイズ、EXIF付き）
 - `f`: FITS保存（uint16、スタック平均値）
 - `r`: NPY保存（16bit RAW）
 - `h`: 左右反転 ON/OFF
@@ -448,36 +450,21 @@ rpicam-raw --width 3840 --height 2160 --framerate 0.3 \
 
 **インストール方法:**
 
-1. `astropy` (FITSファイル保存用)
-   ```bash
-   pip install astropy
-   ```
+```bash
+pip install -r requirements.txt
+```
 
-2. `Pillow` (JPEG/PNG保存用、EXIFデータ付与)
-   ```bash
-   pip install Pillow
-   ```
+`picamera2` は Raspberry Pi 側のみ必要です（PC環境では不要）:
 
-3. `piexif` (EXIFデータ操作用)
-   ```bash
-   pip install piexif
-   ```
-
-4.`opencv`  (画像処理用)
-   ```bash
-   pip install opencv-python
-   ```
-
-5.`picamera2`  (RasPiカメラ用、既に入っているかも)
-   ```bash
-   pip install picamera2
-   ```
+```bash
+pip install picamera2
+```
 
 **仮想環境を使用する場合:**
 ```bash
 python3 -m venv --system-site-packages venv
 source venv/bin/activate
-pip install astropy Pillow piexif opencv-python picamera2
+pip install -r requirements.txt
 ```
 
 ## 変更履歴

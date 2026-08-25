@@ -14,7 +14,8 @@ rpicam-raw TCP生ストリーム専用ライブスタック
     [q] 終了
     [m] 設定メニュー
     [i] 情報表示 ON/OFF
-    [s] PNG保存
+    [s] PNG保存 (WB/ガンマ適用後、tEXtメタデータ付き)
+    [j] JPEG保存 (WB/ガンマ適用後、EXIF付き)
     [S] SER保存 (バッファ全フレームをマルチフレームSER)
     [r] NPY保存 (16bit RAW展開後)
     [f] FITS保存
@@ -36,6 +37,7 @@ rpicam-raw TCP生ストリーム専用ライブスタック
 """
 
 import argparse
+import datetime
 import os
 import socket
 import sys
@@ -44,6 +46,8 @@ import time
 
 import cv2
 import numpy as np
+import piexif
+from PIL import Image, PngImagePlugin
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "common"))
 from hist_overlay import draw_hist_ccdf_overlay
@@ -119,6 +123,37 @@ def compute_white_ratio_native(frame_native, threshold_native):
     if total_pixels <= 0:
         return 0.0
     return float(white_pixels) / float(total_pixels)
+
+
+def _make_exif_bytes(frame_count, effective_bits, bayer_name, wb_gains, gamma_value,
+                     stack_count, stack_enabled, source, flip_h, flip_v, wire_format, w, h):
+    """JPEG用EXIFバイト列を生成する。"""
+    now_str = datetime.datetime.now().strftime("%Y:%m:%d %H:%M:%S")
+    meta = (
+        f"bits={effective_bits} bayer={bayer_name} "
+        f"wb_b={wb_gains[0]:.3f} wb_g={wb_gains[1]:.3f} wb_r={wb_gains[2]:.3f} "
+        f"gamma={gamma_value:.3f} stack_count={stack_count} "
+        f"stack={'ON' if stack_enabled else 'OFF'} "
+        f"frame={frame_count} flip_h={flip_h} flip_v={flip_v} "
+        f"wire={wire_format or 'N/A'}"
+    )
+    exif_dict = {
+        "0th": {
+            piexif.ImageIFD.Make: b"rpicam-raw",
+            piexif.ImageIFD.Software: b"raw_live_stack.py",
+            piexif.ImageIFD.DateTime: now_str.encode("ascii"),
+            piexif.ImageIFD.ImageDescription: source.encode("ascii", errors="replace"),
+            piexif.ImageIFD.ImageWidth: w,
+            piexif.ImageIFD.ImageLength: h,
+        },
+        "Exif": {
+            piexif.ExifIFD.DateTimeOriginal: now_str.encode("ascii"),
+            piexif.ExifIFD.PixelXDimension: w,
+            piexif.ExifIFD.PixelYDimension: h,
+            piexif.ExifIFD.UserComment: b"ASCII\x00\x00\x00" + meta.encode("ascii", errors="replace"),
+        },
+    }
+    return piexif.dump(exif_dict)
 
 
 # ---------------------------------------------------------------------------
@@ -764,7 +799,6 @@ def save_ser(frames, filename, bayer_key, bits, width, height, lsb=False):
     AutoStakkert! / PIPP / Registax 等で直接読み込んで再スタック可能。
     """
     import struct
-    import datetime
 
     # SER ColorID マッピング（SER Player互換: RGGB↔BGGR, GRBG↔GBRG を反転）
     color_id_map = {"RGGB": 11, "GRBG": 10, "GBRG": 9, "BGGR": 8}
@@ -1128,7 +1162,6 @@ def run_raw_live_stack(args):
             # --- SER リアルタイム追記 ---
             # スタックON: スタック加算値を書き込む / スタックOFF: 最新1フレームを書き込む
             if _ser_recording and _ser_file is not None:
-                import datetime
                 shift = 0 if args.ser_lsb else (16 - effective_bits)  # LSB詰め or MSB詰め(上位詰め)
                 if stack_enabled and live_stack.stacked_raw16 is not None:
                     ser_f32 = live_stack.stacked_raw16.astype(np.float32)
@@ -1371,12 +1404,44 @@ def run_raw_live_stack(args):
                 fname = f"raw_live_stack_frame{frame_count}.png"
                 wb_full = apply_white_balance(display_frame, wb_gains)
                 png_frame = apply_gamma_correction(wb_full, gamma_value)
-                cv2.imwrite(fname, png_frame)
-                print(f"[save] PNG: {fname}  (WB/Gamma適用後, フルサイズ)")
+                h_s, w_s = png_frame.shape[:2]
+                png_info = PngImagePlugin.PngInfo()
+                png_info.add_text("DateTime", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                png_info.add_text("Source", args.source)
+                png_info.add_text("Bits", str(effective_bits))
+                png_info.add_text("Bayer", bayer_keys[bayer_idx])
+                png_info.add_text("WB_B", f"{wb_gains[0]:.3f}")
+                png_info.add_text("WB_G", f"{wb_gains[1]:.3f}")
+                png_info.add_text("WB_R", f"{wb_gains[2]:.3f}")
+                png_info.add_text("Gamma", f"{gamma_value:.3f}")
+                png_info.add_text("StackCount", str(live_stack.stack_count))
+                png_info.add_text("StackMode", "ON" if stack_enabled else "OFF")
+                png_info.add_text("Frame", str(frame_count))
+                png_info.add_text("FlipH", str(flip_h))
+                png_info.add_text("FlipV", str(flip_v))
+                if args.wire_format:
+                    png_info.add_text("WireFormat", args.wire_format)
+                pil_img = Image.fromarray(cv2.cvtColor(png_frame, cv2.COLOR_BGR2RGB))
+                pil_img.save(fname, "PNG", pnginfo=png_info)
+                print(f"[save] PNG: {fname}  (WB/Gamma適用後, フルサイズ, tEXt付き)")
+            elif key == ord("j") and save_frame is not None:
+                fname = f"raw_live_stack_frame{frame_count}.jpg"
+                wb_full = apply_white_balance(save_frame, wb_gains)
+                jpg_frame = apply_gamma_correction(wb_full, gamma_value)
+                h_j, w_j = jpg_frame.shape[:2]
+                exif_bytes = _make_exif_bytes(
+                    frame_count, effective_bits, bayer_keys[bayer_idx],
+                    wb_gains, gamma_value, live_stack.stack_count,
+                    stack_enabled, args.source, flip_h, flip_v,
+                    args.wire_format, w_j, h_j,
+                )
+                pil_img = Image.fromarray(cv2.cvtColor(jpg_frame, cv2.COLOR_BGR2RGB))
+                pil_img.save(fname, "JPEG", quality=95, exif=exif_bytes)
+                print(f"[save] JPEG: {fname}  (WB/Gamma適用後, フルサイズ, EXIF付き)")
             elif key == ord("S"):
                 if not _ser_recording:
                     # --- 録画開始 ---
-                    import struct, datetime
+                    import struct
                     # ColorID=BayerパターンID: SER Player互換（RGGB↔BGGR, GRBG↔GBRG を反転）
                     color_id_map = {"RGGB": 11, "GRBG": 10, "GBRG": 9, "BGGR": 8}
                     color_id = color_id_map.get(bayer_keys[bayer_idx], 0)
@@ -1393,9 +1458,9 @@ def run_raw_live_stack(args):
                         + struct.pack("<I", h_r)
                         + struct.pack("<I", 16)          # PixelDepthPerPlane: 16bit (C実装に合わせ固定)
                         + struct.pack("<I", 0)   # フレーム数: 停止時にパッチ
-                        + b"LiveStack".ljust(40, b"\x00")[:40]
-                        + b"rpicam-raw".ljust(40, b"\x00")[:40]
-                        + b"".ljust(40, b"\x00")
+                        + f"WB B:{wb_gains[0]:.2f} G:{wb_gains[1]:.2f} R:{wb_gains[2]:.2f} g:{gamma_value:.2f}".encode()[:40].ljust(40, b"\x00")
+                        + f"rpicam-raw {args.wire_format or ''}".encode()[:40].ljust(40, b"\x00")
+                        + f"stk={live_stack.stack_count} {effective_bits}bit {bayer_keys[bayer_idx]}".encode()[:40].ljust(40, b"\x00")
                         + struct.pack("<q", ticks)
                         + struct.pack("<q", ticks)
                     )
@@ -1428,7 +1493,18 @@ def run_raw_live_stack(args):
                     "MODE": "LiveStack" if stack_enabled else "LiveView",
                     "DATE": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "BITPIX": effective_bits,
+                    "BAYER": bayer_keys[bayer_idx],
+                    "WB_B": round(float(wb_gains[0]), 4),
+                    "WB_G": round(float(wb_gains[1]), 4),
+                    "WB_R": round(float(wb_gains[2]), 4),
+                    "GAMMA": round(float(gamma_value), 4),
+                    "FRAME": frame_count,
+                    "FLIP_H": flip_h,
+                    "FLIP_V": flip_v,
+                    "SOURCE": args.source[:68],
                 }
+                if args.wire_format:
+                    metadata["WIRE_FMT"] = args.wire_format
                 fname = f"raw_live_stack_frame{frame_count}.fits"
                 if stack_enabled and live_stack.stacked_raw16 is not None:
                     # raw16空間で加算したスタックをN枚平均してuint16 RGBで保存
