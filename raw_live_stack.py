@@ -32,12 +32,15 @@ rpicam-raw TCP生ストリーム専用ライブスタック
     [W] WBリセット (B/G/R=1.0)
     [g] ガンマ調整モード ON/OFF（左右キーで変更）
     [G] ガンマリセット (0.80)
-    [d] ダークフレーム取得（レンズキャップして押す）
-    [D] ダークフレームクリア
+    [d] ダークフレーム取得（レンズキャップして押す、複数回で加算平均）
+    [D] ダークフレームクリア（終了時に保存されなくなる）
+    [C] 設定をJSONに保存（--config 指定時はそのパス、未指定時は config.json）
+    ※ダークは終了時に dark.fits へ自動保存、次回起動時に自動読み込み
 """
 
 import argparse
 import datetime
+import json
 import os
 import socket
 import sys
@@ -863,6 +866,41 @@ def save_fits(image, filename, metadata):
     print(f"FITSファイル保存: {filename}")
 
 
+def _save_dark_fits(path, dark_frame, bayer_name, dark_count):
+    """ダークフレームをFITS(float32 Bayer単面)で保存する。"""
+    try:
+        from astropy.io import fits
+    except Exception as e:
+        print(f"[dark] FITS保存失敗: {e}")
+        return
+    hdu = fits.PrimaryHDU(dark_frame.astype(np.float32))
+    hdu.header["DATE"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    hdu.header["DARK_CNT"] = dark_count
+    hdu.header["BAYER"] = bayer_name
+    hdu.writeto(path, overwrite=True)
+    print(f"[dark] 保存: {path}  ({dark_count}枚平均  shape={dark_frame.shape})")
+
+
+def _load_dark_fits(path, expected_shape):
+    """FITSからダークフレームを読み込む。形状不一致時は(None, 0)を返す。"""
+    try:
+        from astropy.io import fits
+        with fits.open(path) as hdul:
+            data = hdul[0].data.astype(np.float32)
+            hdr = hdul[0].header
+    except Exception as e:
+        print(f"[dark] 読み込み失敗: {path}  ({e})")
+        return None, 0
+    if data.shape != expected_shape:
+        print(f"[dark] 形状不一致のためスキップ: ファイル={data.shape}  期待={expected_shape}")
+        return None, 0
+    date = hdr.get("DATE", "不明")
+    cnt = int(hdr.get("DARK_CNT", 1))
+    bayer = hdr.get("BAYER", "?")
+    print(f"[dark] 読み込み: {path}  ({cnt}枚平均  {bayer}  取得={date})")
+    return data, cnt
+
+
 # ---------------------------------------------------------------------------
 # メインループ
 # ---------------------------------------------------------------------------
@@ -896,6 +934,12 @@ def run_raw_live_stack(args):
         print(f"[RAW] wire-format={args.wire_format} を有効化: 受信コンテナ16bit / 有効ビット{effective_text}bit として処理します")
     if args.stride:
         print(f"[RAW] stride: {args.stride} bytes/行")
+
+    # ダークフレームを接続前に事前読み込み（args.width/heightは接続前から判明する）
+    _preloaded_dark = None
+    _preloaded_dark_count = 0
+    if os.path.exists(args.dark_file):
+        _preloaded_dark, _preloaded_dark_count = _load_dark_fits(args.dark_file, (args.height, args.width))
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(args.timeout)
@@ -960,6 +1004,14 @@ def run_raw_live_stack(args):
         if max_frames < args.max_frames:
             print(f"[warn] --max-frames {args.max_frames} はメモリ見積もり上限を超えるため {max_frames} にクランプしました")
         live_stack = LiveStack(max_frames=max_frames, verbose=False, bits=effective_bits)
+        if _preloaded_dark is not None:
+            live_stack.dark_frame = _preloaded_dark
+            # dark_bufferにダミーを積んでDARK_CNTを保持する（終了時の再保存で枚数が失われないよう）
+            live_stack.dark_buffer = [_preloaded_dark] * _preloaded_dark_count
+        if args.stop_threshold is not None:
+            live_stack.brightness_threshold = max(1, min((1 << effective_bits) - 1, args.stop_threshold))
+        if args.stop_ratio is not None:
+            live_stack.overflow_ratio_threshold = max(0.01, min(0.50, args.stop_ratio / 100.0))
 
         settings_menu = SettingsMenu()
         stream_menu_names = {"Max Frames", "Stack Mode", "Info Display", "Stop Threshold", "Stop Ratio(%)"}        
@@ -1022,6 +1074,14 @@ def run_raw_live_stack(args):
         cv2.createTrackbar("G x100", WB_WINDOW_NAME, 100, 400, lambda _v: None)
         cv2.createTrackbar("R x100", WB_WINDOW_NAME, 100, 400, lambda _v: None)
         cv2.createTrackbar("Gamma x100", WB_WINDOW_NAME, 80, 400, lambda _v: None)
+        if args.wb_b is not None:
+            cv2.setTrackbarPos("B x100", WB_WINDOW_NAME, gain_to_slider(args.wb_b))
+        if args.wb_g is not None:
+            cv2.setTrackbarPos("G x100", WB_WINDOW_NAME, gain_to_slider(args.wb_g))
+        if args.wb_r is not None:
+            cv2.setTrackbarPos("R x100", WB_WINDOW_NAME, gain_to_slider(args.wb_r))
+        if args.gamma is not None:
+            cv2.setTrackbarPos("Gamma x100", WB_WINDOW_NAME, gamma_to_slider(args.gamma))
 
         def on_wb_click(event, x, y, flags, param):
             if event == cv2.EVENT_LBUTTONDOWN and click_wb_mode:
@@ -1073,6 +1133,10 @@ def run_raw_live_stack(args):
         _ser_frame_count = 0
         _ser_fname = ""
         _ser_timestamps = []   # フレームごとの受信時刻 Ticks（トレーラー用）
+        # 画面上に一時表示する通知メッセージ: [(text, expire_time), ...]
+        _hud_msgs = []
+        if live_stack.dark_frame is not None:
+            _hud_msgs.append((f"[dark] {args.dark_file} 読み込み済み", time.time() + 6))
         frame_bytes = first_frame_bytes
 
         # --- バックグラウンドスタックスレッド ---
@@ -1323,6 +1387,14 @@ def run_raw_live_stack(args):
                     (preview_frame.shape[1] - 100, 24),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 220), 1, cv2.LINE_AA)
 
+            # --- HUD通知（起動時ダーク読み込み等、1本6秒）---
+            now_t = time.time()
+            _hud_msgs = [(msg, exp) for msg, exp in _hud_msgs if exp > now_t]
+            for i, (msg, _) in enumerate(_hud_msgs):
+                cv2.putText(preview_frame, msg,
+                    (10, preview_frame.shape[0] - 14 - i * 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 220), 1, cv2.LINE_AA)
+
             cv2.imshow(PREVIEW_WINDOW_NAME, preview_frame)
 
             # --- キー入力 ---
@@ -1554,6 +1626,17 @@ def run_raw_live_stack(args):
                 live_stack.dark_frame = None
                 live_stack.dark_buffer = []
                 print("[dark] ダークフレームクリア")
+            elif key == ord("C"):
+                config_path = args.config if args.config else "config.json"
+                # メニューで変更された可能性がある値をargsに反映してから保存
+                args.stop_threshold = live_stack.brightness_threshold
+                args.stop_ratio = round(live_stack.overflow_ratio_threshold * 100.0, 1)
+                args.wb_b = round(float(wb_gains[0]), 3)
+                args.wb_g = round(float(wb_gains[1]), 3)
+                args.wb_r = round(float(wb_gains[2]), 3)
+                args.gamma = round(float(gamma_value), 3)
+                _save_config(config_path, args)
+                _hud_msgs.append((f"[config] 保存: {config_path}", time.time() + 5))
             elif key == ord("b"):
                 bayer_idx = (bayer_idx + 1) % len(bayer_keys)
                 bayer_code = BAYER_MAP[bayer_keys[bayer_idx]]
@@ -1604,6 +1687,13 @@ def run_raw_live_stack(args):
         _stack_stop.set()
         _stack_event.set()   # wait() をすぐに解除してスレッドを終了させる
         _stack_thread.join(timeout=5.0)
+        # ダークフレームの自動保存（[D]クリア後は dark_frame=None のため保存しない）
+        try:
+            if live_stack.dark_frame is not None:
+                _save_dark_fits(args.dark_file, live_stack.dark_frame,
+                                bayer_keys[bayer_idx], len(live_stack.dark_buffer))
+        except Exception:
+            pass
         sock.close()
         cv2.destroyAllWindows()
         print("RAW Live Stack終了")
@@ -1631,12 +1721,71 @@ def build_arg_parser():
     parser.add_argument("--ser-lsb", action="store_true", help="SER書き出しを下位詰め(LSB-aligned)にする (デフォルト: 上位詰めMSB-aligned)")
     parser.add_argument("--flip-h", action="store_true", help="左右反転して起動")
     parser.add_argument("--flip-v", action="store_true", help="上下反転して起動")
+    parser.add_argument("--dark-file", type=str, default="dark.fits",
+                        help="ダークフレームの保存/読み込みパス (デフォルト: dark.fits)")
+    parser.add_argument("--stop-threshold", type=int, default=None,
+                        help="スタック打ち切り輝度しきい値 (ネイティブbit深度単位、未指定=bit深度の最大値)")
+    parser.add_argument("--stop-ratio", type=float, default=None,
+                        help="スタック打ち切り比率%% (1−50、未指定=10.0)")
+    parser.add_argument("--wb-b", type=float, default=None, help="初期WBゲイン B (デフォルト: 1.0)")
+    parser.add_argument("--wb-g", type=float, default=None, help="初期WBゲイン G (デフォルト: 1.0)")
+    parser.add_argument("--wb-r", type=float, default=None, help="初期WBゲイン R (デフォルト: 1.0)")
+    parser.add_argument("--gamma", type=float, default=None, help="初期ガンマ値 (デフォルト: 0.80)")
     return parser
 
 
+def _load_config(path):
+    """設定JSONを読み込んでdictを返す。"""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[config] 読み込み失敗: {path}  ({e})")
+        return {}
+
+
+def _save_config(path, args):
+    """実効引数をJSON設定ファイルに保存する。"""
+    exclude = {"config", "save_config"}
+    d = {k: v for k, v in vars(args).items() if k not in exclude}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=2)
+    print(f"[config] 保存: {path}")
+
+
 def main():
+    # --config / --save-configだけ先に取り出してJSONを読む
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", nargs="?", const="config.json", default=None)
+    pre.add_argument("--save-config", default=None)
+    pre_args, _ = pre.parse_known_args()
+
     parser = build_arg_parser()
+    parser.add_argument("--config", type=str, nargs="?", const="config.json", default=None,
+                        help="JSON設定ファイルのパス。値省略時は config.json を使用")
+    parser.add_argument("--save-config", type=str, default=None,
+                        help="実効設定をJSONに保存して終了 (例: imx678.json)")
+
+    if pre_args.config:
+        cfg = _load_config(pre_args.config)
+        if cfg:
+            # JSONに source があれば --source の required を外す
+            if "source" in cfg:
+                for action in parser._actions:
+                    if action.dest == "source":
+                        action.required = False
+            parser.set_defaults(**cfg)
+            print(f"[config] 読み込み: {pre_args.config}")
+
     args = parser.parse_args()
+
+    if args.source is None:
+        parser.error("--source または --config に source を指定してください")
+
+    if args.save_config:
+        _save_config(args.save_config, args)
+        return
+
     run_raw_live_stack(args)
 
 
