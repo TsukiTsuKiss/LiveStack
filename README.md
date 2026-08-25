@@ -14,24 +14,25 @@
 
 ## スクリプト機能比較
 
-| 機能 | live_view.py | live_stack.py | raw_live_view.py | raw_live_stack.py |
-|---|:---:|:---:|:---:|:---:|
-| **入力ソース** | picamera2 / URL | picamera2 / URL | TCP RAWストリーム | TCP RAWストリーム |
-| **RAW（Bayer）処理** | × | × | 〇 | 〇 |
-| **加算スタック** | × | 〇 | × | 〇 |
-| **ダークフレーム減算** | × | 〇 | × | 〇 |
-| **WBゲイン調整** | × | × | 〇 | 〇 |
-| **ガンマ補正** | × | × | 〇 | 〇 |
-| **自動ストレッチ** | × | × | 〇 | 〇 |
-| **ヒストグラム+CCDF** | 〇 | 〇 | 〇 | 〇 |
-| **フリップ（H/V）** | × | 〇 | × | 〇 |
-| **PNG保存** | 〇 | 〇 | 〇 | 〇 |
-| **JPEG保存** | × | 〇 | × | 〇 |
-| **FITS保存** | × | 〇 | × | 〇 |
-| **NPY(RAW16)保存** | × | × | 〇 | 〇 |
-| **SER録画** | × | × | × | 〇 |
-| **カメラ切り替え** | 〇 | 〇 | × | × |
-| **設定メニュー** | × | 〇 | × | 〇 |
+| 機能 | live_stack.py | raw_live_stack.py |
+|---|:---:|:---:|
+| **入力ソース** | picamera2 / URL | TCP RAWストリーム |
+| **RAW（Bayer）処理** | × | 〇 |
+| **加算スタック** | 〇 | 〇 |
+| **ダークフレーム減算** | 〇 | 〇 |
+| **WBゲイン調整** | × | 〇 |
+| **ガンマ補正** | × | 〇 |
+| **自動ストレッチ** | × | 〇 |
+| **ヒストグラム+CCDF** | 〇 | 〇 |
+| **フリップ（H/V）** | 〇 | 〇 |
+| **PNG保存** | 〇 | 〇 |
+| **JPEG保存** | 〇 | 〇 |
+| **FITS保存** | 〇 | 〇 |
+| **NPY(RAW16)保存** | × | 〇 |
+| **SER録画** | × | 〇 |
+| **カメラ切り替え** | 〇 | × |
+| **設定メニュー** | 〇 | 〇 |
+| **SSH自動起動** | × | 〇 |
 
 > 詳細は各スクリプトのセクションを参照。
 
@@ -41,8 +42,6 @@
 
 ```
 camera-live/
-├── live_view.py          # シンプルなライブプレビュー
-├── raw_live_view.py      # rpicam-raw TCP受信専用プレビュー
 ├── live_stack.py         # LiveStack機能付きプレビュー（カメラ直結/URL対応）
 ├── raw_live_stack.py     # rpicam-raw TCP受信 + LiveStack（RAW専用）
 ├── 動作実績.md            # 機材ごとの送受信コマンド実績
@@ -61,128 +60,7 @@ camera-live/
 
 ## アプリケーション
 
-### 1. Live View (`live_view.py`)
-シンプルなリアルタイムカメラプレビュー。ローカルカメラとURLストリームの2モードに対応。
-
-**特徴:**
-- 最小タイムラグ
-- 2モード統一表示（ソース・解像度・フレーム数・統計）
-- 最大1920×1080に自動リサイズ（アスペクト比維持）
-- 右上にヒストグラム+CCDFオーバーレイ（`[h]`でON/OFF）
-- BGR統計表示（min / max / mean / チャンネル別平均）
-
-**モード:**
-- **ローカルカメラモード**: `--source` 未指定時。`picamera2` 経由、カメラ0/1切り替え対応
-- **URLストリームモード**: `--source 0` や `--source tcp://...` 指定時。`cv2.VideoCapture` 経由
-
-**共通操作（全モード）:**
-- `q`: 終了
-- `s`: 画像保存（フルサイズ）
-- `h`: ヒストグラム+CCDFオーバーレイ ON/OFF
-
-**ローカルカメラ追加操作:**
-- `c`: カメラ切り替え（0 ↔ 1）
-- `0` / `1`: カメラ番号直接指定
-
-### 2. RAW Live View (`raw_live_view.py`)
-`rpicam-raw` の生TCPストリームを受信して表示するRAW専用アプリ。
-
-**WB（ホワイトバランス）機能:**
-- RAWデータ自体は変更せず、デベイヤ後画像にのみWBゲインを適用
-- 白点クリックWB: `[w]` でクリックモードON/OFF、白い部分をクリックして自動補正
-- 手動WB: `RAW WB` ウィンドウの B/G/R スライダー（0.10〜4.00）
-- `[W]` でWBリセット（B/G/R = 1.00）
-- `[s]` 保存はWB適用後画像を保存（ストレッチON時は表示トーン相当）
-
-**ガンマ補正機能:**
-- 初期値は `0.80`（GUI表示は `80`）
-- GUI調整: `RAW WB` ウィンドウの `Gamma x100` スライダー（0.10〜4.00）
-- キー調整: `[g]` でガンマ調整モードON/OFF、ON中は左右キーで ±0.05
-- `[G]` でガンマリセット（0.80）
-- `[s]` 保存はガンマ適用後画像を保存（NPY保存のRAW16には非適用）
-
-**RAW Bayerモードの使い方（IMX678）:**
-```bash
-# 送信側 (Raspberry Pi Zero 2W) - 動作確認済み最小構成
-rpicam-raw --width 3840 --height 2160 --framerate 0.3 \
-           --shutter 600000 --gain 1 -t 0 --listen -o tcp://0.0.0.0:8888
-
-# 受信側 (Windows PC) - IMX678確定設定
-python raw_live_view.py --source tcp://192.168.1.17:8888 \
-    --bits 12 --bayer BGGR --raw-width 3856 --raw-height 2180 --stride 5792
-```
-
-> **注意**: `--shutter` は 600000µs (0.6秒) 以上を推奨。  
-> それより短いとlibcameraがセンサーモードを切り替え、strideが変わって  
-> デコードが破綻する場合があります（IMX678 CamHelper 未インストール時）。  
-> 暗い被写体では `--gain` を上げるより `--shutter` を長くする方が高画質です。
-
-**シャッター・ゲインの目安:**
-
-| シャッター | ゲイン | 用途 |
-|---|---|---|
-| 600000 (0.6s) | 1 | 明るい室内・動作確認 |
-| 1000000 (1s) | 1〜4 | 通常室内 |
-| 3000000 (3s) | 1〜8 | 薄暗い室内・天体 |
-| 10000000 (10s) | 1〜8 | 天体撮影 |
-
-**RAWモード引数:**
-
-| 引数 | デフォルト | 説明 |
-|---|---|---|
-| `--width` | 3840 | 表示/クロップ幅 |
-| `--height` | 2160 | 表示/クロップ高さ |
-| `--raw-width` | =width | 実センサーRAW幅（IMX678=3856） |
-| `--raw-height` | =height | 実センサーRAW高さ（IMX678=2180） |
-| `--stride` | 自動 | 1行あたりバイト数（IMX678=5792） |
-| `--bits` | 自動 | ビット深度 8/10/12/16 |
-| `--bayer` | BGGR | Bayerパターン（IMX678確認済み） |
-| `--timeout` | 120 | 受信タイムアウト秒 |
-| `--no-stretch` | - | 自動ストレッチを無効化 |
-
-**stride と行末パディング（重要）:**
-
-- 12bit packed の理論値は `width * 3 / 2` bytes/行。
-- ただし実機では行末にパディングが入り、`--stride` が理論値より大きくなることがあります。
-- この差分は「画素」ではなく、行境界を合わせるための余白バイトです。
-- `--stride` を理論値のまま指定すると行頭位置がずれて、斜め縞のような「非同期画像」になります。
-
-**IMX477 で確認された例（12bit）:**
-
-| 解像度 | 理論 stride | 実運用で通る stride の例 |
-|---|---:|---:|
-| 4056x3040 | 6084 | 6112 |
-| 2028x1520 | 3042 | 3072 |
-
-**同期が崩れたときの確認順:**
-
-1. `--bayer` をセンサーモード表示に合わせる（`SRGGB12` なら `RGGB`）。
-2. `--stride` は理論値ではなく、まずアライン後候補（例: 32byte境界）を試す。
-3. モード変更時は送受信を両方再起動してフレーム境界を取り直す。
-
-> この考え方は `raw_live_view.py` と `raw_live_stack.py` の両方で共通です。
-
-**12U 対応の背景（IMX708）:**
-
-- 運用履歴として、IMX708 で `12:P` が選べない/安定しない環境があり、`12:U` 受信に対応した。
-- これは IMX708 専用実装ではなく、`12:U`（12bitを16bitコンテナで運ぶ形式）全般への対応。
-- `12:U` はセンサー/ドライバ実装で有効12bit位置が異なる場合があるため、受信側で位置合わせ（例: `>>4`）が必要になる。
-
-**操作:**
-- `q`: 終了
-- `s`: PNG保存（WB適用後）
-- `r`: 16bit RAWデータをNPY形式で保存
-- `a`: 自動ストレッチ ON/OFF
-- `b`: Bayerパターン切り替え（RGGB→BGGR→GRBG→GBRG）
-- `n`: 次のフォーマット候補に切り替え
-- `+` / `-`: skip ±1ストライド
-- `H`: ヒストグラム+CCDFオーバーレイ ON/OFF
-- `w`: 白点クリックWB ON/OFF
-- `W`: WBリセット（B/G/R=1.00）
-- `g`: ガンマ調整モード ON/OFF（左右キーで変更）
-- `G`: ガンマリセット（0.80）
-
-### 3. RAW Live Stack (`raw_live_stack.py`)
+### 1. RAW Live Stack (`raw_live_stack.py`)
 `rpicam-raw` の生TCPストリームを受信しながらリアルタイムにフレームをスタックするRAW専用アプリ。
 
 **主な特徴:**
@@ -284,7 +162,7 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - `--rpicam-cmd <cmd>`: Pi側で実行するコマンド（`--listen -o tcp://...` は自動補完）
 - `--no-ssh`: JSONに `ssh_host` が設定されていても手動起動モードで接続
 
-### 4. Live Stack (`live_stack.py`)
+### 2. Live Stack (`live_stack.py`)
 リアルタイムでフレームを加算スタックし、ノイズ軽減と画質向上を実現するプレビューアプリケーション（カメラ切り替え機能付き）。
 
 #### 主な機能
@@ -355,7 +233,7 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - 動作不良時は非スタッキングモードに戻す機能を実装。
 - 最新の改善により、安定した動作が確認されています。
 
-### 4. 保存機能
+### 3. 保存機能
 Live Stackモードでは以下の形式で画像を保存できます。
 
 **保存形式:**
@@ -380,18 +258,17 @@ Live Stackモードでは以下の形式で画像を保存できます。
 cd /home/tsuki/MyApps/camera-live
 source ../preview/.venv/bin/activate
 
-# シンプルプレビュー
-python3 live_view.py
+# RAW TCPストリーム受信 + LiveStack
+python raw_live_stack.py --config imx585.json
 
-# RAW専用プレビュー
-python3 raw_live_view.py --source tcp://192.168.1.17:8888 --bits 12 --bayer BGGR --raw-width 3856 --raw-height 2180 --stride 5792
+# SSH自動起動を使わず手動起動モードで接続
+python raw_live_stack.py --config imx585.json --no-ssh
 
-# LiveStack機能付き
+# LiveStack機能付きプレビュー（ローカルカメラ）
 python3 live_stack.py
 
 # 最大スタックフレーム数を指定して起動
 python3 live_stack.py --max-frames 50
-python3 live_stack.py -n 50
 
 # フリップを指定して起動
 python3 live_stack.py --flip-h          # 左右反転
@@ -408,15 +285,10 @@ python3 live_stack.py --help
 
 ```bash
 # ローカルUSBカメラ（例: 0番）
-python3 live_view.py --source 0
 python3 live_stack.py --source 0
 
 # リモートTCPストリーム
-python3 live_view.py --source tcp://192.168.1.17:8888
 python3 live_stack.py --source tcp://192.168.1.17:8888
-
-# RAW TCPストリーム (rpicam-raw) プレビューのみ
-python3 raw_live_view.py --source tcp://192.168.1.17:8888 --bits 12 --bayer BGGR --raw-width 3856 --raw-height 2180 --stride 5792
 
 # RAW TCPストリーム (rpicam-raw) + LiveStack
 python raw_live_stack.py --source tcp://192.168.1.17:8888 --bits 12 --bayer BGGR --raw-width 3856 --raw-height 2180 --stride 5792
@@ -501,7 +373,7 @@ pip install -r requirements.txt
 
 #### 2026/08/25 raw_live_stack.py: フリップ機能追加・キー割当統一
 - **フリップ機能追加**: `raw_live_stack.py` に `--flip-h`/`--flip-v` 引数と `[h]`/`[v]` キートグルを追加（`live_stack.py` と同様の仕様）
-- **キー割当変更**: `raw_live_stack.py`/`raw_live_view.py` のヒストグラム切替キーを `[h]` から `[H]` に変更（`[h]`はフリップ用と衝突するため）
+- **キー割当変更**: `raw_live_stack.py` のヒストグラム切替キーを `[h]` から `[H]` に変更（`[h]`はフリップ用と衝突するため）
 
 #### 2026/05/19 raw_live_stack.py: スレッド分離・パフォーマンス改善
 - **スタックスレッド分離**: `process_stack` をバックグラウンドスレッド化し、重い計算中でもキー入力・表示が止まらないよう改善
@@ -514,7 +386,7 @@ pip install -r requirements.txt
 - **12bitネイティブヒストグラム**: raw16空間でヒストグラム+CCDF表示、stretch▲△マーカー追加
 
 #### 2026/05/10 リモートソース対応・判定整合改善
-- **source対応**: `live_view.py` / `live_stack.py` に `--source` を追加（カメラ番号または `tcp://...` を指定可能）。
+- **source対応**: `live_stack.py` に `--source` を追加（カメラ番号または `tcp://...` を指定可能）。
 - **Windows起動改善**: `picamera2` などの依存ライブラリを遅延import化し、`--source` 利用時に非Raspberry Pi環境でも起動可能に改善。
 - **メニュー操作改善**: `waitKeyEx` ベースに変更し、Windowsで矢印キーが正しく動作するよう修正。
 - **停止判定の整合**: 閾値超過フレームを「加算前」に判定して停止する方式へ修正。
@@ -530,7 +402,7 @@ pip install -r requirements.txt
 - **ヒストグラム追加**: 右上に統計グラフ（ヒストグラム + CCDF）を表示し、閾値/比率の判定を可視化。
 - **停止条件の調整機能**: `Stop Threshold`（127～255）と`Stop Ratio(%)`（1～50）を設定メニューに追加。
 - **表示/操作の改善**: グラフ可読性を改善（対数正規化・太線化・注記位置調整）、`Enter`は適用のみ（閉じない）に変更。
-- **共通部品化**: グラフ描画を `common/hist_overlay.py` に集約し、`live_stack.py` と `live_view.py` で共有。
+- **共通部品化**: グラフ描画を `common/hist_overlay.py` に集約し、`live_stack.py` で共有。
 
 #### 2026/02/28 UI・表示改善
 - **Size選択の導入**: `FAST/HIGH` 2択から、カメラごとの利用可能解像度一覧選択へ変更。
