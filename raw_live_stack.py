@@ -42,6 +42,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import socket
 import sys
 import threading
@@ -129,7 +130,8 @@ def compute_white_ratio_native(frame_native, threshold_native):
 
 
 def _make_exif_bytes(frame_count, effective_bits, bayer_name, wb_gains, gamma_value,
-                     stack_count, stack_enabled, source, flip_h, flip_v, wire_format, w, h):
+                     stack_count, stack_enabled, source, flip_h, flip_v, wire_format, w, h,
+                     shutter_us=None, gain=None):
     """JPEG用EXIFバイト列を生成する。"""
     now_str = datetime.datetime.now().strftime("%Y:%m:%d %H:%M:%S")
     meta = (
@@ -140,6 +142,10 @@ def _make_exif_bytes(frame_count, effective_bits, bayer_name, wb_gains, gamma_va
         f"frame={frame_count} flip_h={flip_h} flip_v={flip_v} "
         f"wire={wire_format or 'N/A'}"
     )
+    if shutter_us is not None:
+        meta += f" shutter={shutter_us}us"
+    if gain is not None:
+        meta += f" gain={gain}"
     exif_dict = {
         "0th": {
             piexif.ImageIFD.Make: b"rpicam-raw",
@@ -156,6 +162,8 @@ def _make_exif_bytes(frame_count, effective_bits, bayer_name, wb_gains, gamma_va
             piexif.ExifIFD.UserComment: b"ASCII\x00\x00\x00" + meta.encode("ascii", errors="replace"),
         },
     }
+    if shutter_us is not None:
+        exif_dict["Exif"][piexif.ExifIFD.ExposureTime] = (int(shutter_us), 1_000_000)
     return piexif.dump(exif_dict)
 
 
@@ -901,6 +909,57 @@ def _load_dark_fits(path, expected_shape):
     return data, cnt
 
 
+def _parse_rpicam_param(cmd, key):
+    """rpicam-rawコマンド文字列から --key value を取り出す。見つからなければNone。"""
+    m = re.search(rf'--{key}\s+(\S+)', cmd)
+    return m.group(1) if m else None
+
+
+def _ssh_start_rpicam(ssh_host, ssh_user, ssh_key, rpicam_cmd, port):
+    """SSH鍵認証でPiに接続しrpicam-rawをバックグラウンド起動する。(client, pid)を返す。"""
+    import paramiko
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.connect(ssh_host, username=ssh_user, key_filename=os.path.expanduser(ssh_key))
+
+    cmd = rpicam_cmd.strip()
+    if "--listen" not in cmd:
+        cmd += " --listen"
+    if "-o tcp://" not in cmd:
+        cmd += f" -o tcp://0.0.0.0:{port}"
+    if " -t " not in cmd:
+        cmd += " -t 0"
+
+    remote_cmd = f"nohup {cmd} > /tmp/rpicam_raw.log 2>&1 & echo $!"
+    _, stdout, _ = client.exec_command(remote_cmd)
+    pid_line = stdout.readline().strip()
+    try:
+        pid = int(pid_line)
+    except ValueError:
+        pid = None
+
+    print(f"[SSH] {ssh_host}: {cmd}")
+    print(f"[SSH] rpicam-raw 起動 PID={pid}")
+    return client, pid
+
+
+def _ssh_kill_rpicam(client, pid, ssh_host):
+    """SSH経由でrpicam-rawプロセスを停止し接続を閉じる。"""
+    if client is None:
+        return
+    try:
+        kill_cmd = f"kill {pid}" if pid else "pkill -f rpicam-raw"
+        client.exec_command(f"{kill_cmd} 2>/dev/null; true")
+        print(f"[SSH] {ssh_host}: rpicam-raw 停止 (PID={pid})")
+    except Exception as e:
+        print(f"[SSH] プロセス停止エラー: {e}")
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # メインループ
 # ---------------------------------------------------------------------------
@@ -940,6 +999,16 @@ def run_raw_live_stack(args):
     _preloaded_dark_count = 0
     if os.path.exists(args.dark_file):
         _preloaded_dark, _preloaded_dark_count = _load_dark_fits(args.dark_file, (args.height, args.width))
+
+    # SSH経由でrpicam-rawを起動する（--ssh-host指定時のみ）
+    _ssh_client = None
+    _rpicam_pid = None
+    if args.ssh_host:
+        _ssh_client, _rpicam_pid = _ssh_start_rpicam(
+            args.ssh_host, args.ssh_user, args.ssh_key, args.rpicam_cmd, port
+        )
+        print("[SSH] rpicam-raw 起動待ち (2秒)...")
+        time.sleep(2)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(args.timeout)
@@ -1506,6 +1575,8 @@ def run_raw_live_stack(args):
                     wb_gains, gamma_value, live_stack.stack_count,
                     stack_enabled, args.source, flip_h, flip_v,
                     args.wire_format, w_j, h_j,
+                    shutter_us=_parse_rpicam_param(args.rpicam_cmd, "shutter") if args.rpicam_cmd else None,
+                    gain=_parse_rpicam_param(args.rpicam_cmd, "gain") if args.rpicam_cmd else None,
                 )
                 pil_img = Image.fromarray(cv2.cvtColor(jpg_frame, cv2.COLOR_BGR2RGB))
                 pil_img.save(fname, "JPEG", quality=95, exif=exif_bytes)
@@ -1696,6 +1767,7 @@ def run_raw_live_stack(args):
             pass
         sock.close()
         cv2.destroyAllWindows()
+        _ssh_kill_rpicam(_ssh_client, _rpicam_pid, args.ssh_host or "")
         print("RAW Live Stack終了")
 
 
@@ -1731,6 +1803,14 @@ def build_arg_parser():
     parser.add_argument("--wb-g", type=float, default=None, help="初期WBゲイン G (デフォルト: 1.0)")
     parser.add_argument("--wb-r", type=float, default=None, help="初期WBゲイン R (デフォルト: 1.0)")
     parser.add_argument("--gamma", type=float, default=None, help="初期ガンマ値 (デフォルト: 0.80)")
+    parser.add_argument("--ssh-host", type=str, default=None,
+                        help="SSH接続先ホスト。指定時にPi側でrpicam-rawを自動起動する")
+    parser.add_argument("--ssh-user", type=str, default="pi",
+                        help="SSHユーザー名 (デフォルト: pi)")
+    parser.add_argument("--ssh-key", type=str, default="~/.ssh/id_rsa",
+                        help="SSH秘密鍵パス (デフォルト: ~/.ssh/id_rsa)")
+    parser.add_argument("--rpicam-cmd", type=str, default=None,
+                        help="Pi側で実行するrpicam-rawコマンド。--listen/-oは自動補完される")
     return parser
 
 
@@ -1780,7 +1860,15 @@ def main():
     args = parser.parse_args()
 
     if args.source is None:
-        parser.error("--source または --config に source を指定してください")
+        # --ssh-hostがあれば source を自動導出（ポートはデフォルト8888）
+        if args.ssh_host:
+            args.source = f"tcp://{args.ssh_host}:8888"
+            print(f"[SSH] --source 未指定のため自動設定: {args.source}")
+        else:
+            parser.error("--source または --config に source、もしくは --ssh-host を指定してください")
+
+    if args.ssh_host and not args.rpicam_cmd:
+        parser.error("--ssh-host 指定時は --rpicam-cmd も必須です")
 
     if args.save_config:
         _save_config(args.save_config, args)
