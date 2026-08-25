@@ -190,6 +190,7 @@ python raw_live_view.py --source tcp://192.168.1.17:8888 \
 - **スタックスレッド分離**: `process_stack` をバックグラウンドスレッドで実行し、メインスレッドはキー入力・フレーム受信・表示を独立して継続するため、重いスタック計算中でも操作が止まらない
 - **ダークフレーム**: `[d]` でレンズキャップ状態のフレームを取得・平均化。`[D]` でクリア。終了時に `dark.fits` へ自動保存、次回起動時に自動読み込み
 - **設定ファイル**: `--config` でJSON設定ファイルを読み込み。`[C]` キーでWB/ガンマ/Stop値を含む現在の設定をJSONに上書き保存
+- **SSH連携**: `--ssh-host`/`--ssh-user`/`--ssh-key`/`--rpicam-cmd` を指定するとPC側1コマンドでPi上のrpicam-rawを自動起動・終了。`--no-ssh` でJSONの設定を無視して手動起動モードに切り替え可能
 - **12bitネイティブヒストグラム+CCDF**: raw16空間のデータをそのままヒストグラム表示（1/4サブサンプリングで高速化）
 - **ストレッチマーカー（▲△）**: Stack OFF時に自動ストレッチの下限・上限をヒストグラム上に表示
 - **WB/ガンマ最適化**: リサイズ後の小さい画像にWB/ガンマを適用（フルサイズ処理を回避して高速化）
@@ -211,6 +212,15 @@ python raw_live_stack.py --source tcp://192.168.1.17:8888 \
     --bits 12 --bayer BGGR --raw-width 3856 --raw-height 2180 --stride 5792 \
     --save-config imx678.json
 python raw_live_stack.py --config imx678.json
+```
+
+**起動例（SSH連携 ワンコマンド起動。imx585.json に ssh_host/rpicam_cmd を記載済みの場合）:**
+```bash
+# PC側だけで起動（rpicam-rawのSSH起動・終了も自動）
+python raw_live_stack.py --config imx585.json
+
+# Pi側で既にrpicam-rawを手動起動済みのとき（SSH自動起動をスキップ）
+python raw_live_stack.py --config imx585.json --no-ssh
 ```
 
 **起動例（12U運用。IMX708 など）:**
@@ -266,6 +276,13 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - `d`: ダークフレーム取得（レンズキャップして押す、複数回で加算平均）
 - `D`: ダークフレームクリア（終了時に保存されなくなる）
 - `C`: 設定をJSONに保存（`--config` 指定時はそのパス、未指定時は `config.json`）
+
+**SSH連携オプション（CLIまたはJSONで指定）:**
+- `--ssh-host <IP>`: Pi側ホスト。指定時に起動・終了を自動制御
+- `--ssh-user <user>`: SSHユーザー名（デフォルト: `pi`）
+- `--ssh-key <path>`: SSH秘密鍵パス（デフォルト: `~/.ssh/id_rsa`）
+- `--rpicam-cmd <cmd>`: Pi側で実行するコマンド（`--listen -o tcp://...` は自動補完）
+- `--no-ssh`: JSONに `ssh_host` が設定されていても手動起動モードで接続
 
 ### 4. Live Stack (`live_stack.py`)
 リアルタイムでフレームを加算スタックし、ノイズ軽減と画質向上を実現するプレビューアプリケーション（カメラ切り替え機能付き）。

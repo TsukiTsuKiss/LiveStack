@@ -1811,6 +1811,8 @@ def build_arg_parser():
                         help="SSH秘密鍵パス (デフォルト: ~/.ssh/id_rsa)")
     parser.add_argument("--rpicam-cmd", type=str, default=None,
                         help="Pi側で実行するrpicam-rawコマンド。--listen/-oは自動補完される")
+    parser.add_argument("--no-ssh", action="store_true",
+                        help="SSH自動起動を無効化。設定ファイルのssi_hostの指定を上書きする")
     return parser
 
 
@@ -1858,6 +1860,9 @@ def main():
             print(f"[config] 読み込み: {pre_args.config}")
 
     args = parser.parse_args()
+
+    if args.no_ssh:
+        args.ssh_host = None
 
     if args.source is None:
         # --ssh-hostがあれば source を自動導出（ポートはデフォルト8888）
