@@ -131,21 +131,42 @@ def compute_white_ratio_native(frame_native, threshold_native):
 
 def _make_exif_bytes(frame_count, effective_bits, bayer_name, wb_gains, gamma_value,
                      stack_count, stack_enabled, source, flip_h, flip_v, wire_format, w, h,
-                     shutter_us=None, gain=None):
+                     shutter_us=None, gain=None,
+                     telescope=None, obs_filter=None, mount=None,
+                     object_name=None, observer=None, instrument=None):
     """JPEG用EXIFバイト列を生成する。"""
     now_str = datetime.datetime.now().strftime("%Y:%m:%d %H:%M:%S")
-    meta = (
-        f"bits={effective_bits} bayer={bayer_name} "
-        f"wb_b={wb_gains[0]:.3f} wb_g={wb_gains[1]:.3f} wb_r={wb_gains[2]:.3f} "
-        f"gamma={gamma_value:.3f} stack_count={stack_count} "
-        f"stack={'ON' if stack_enabled else 'OFF'} "
-        f"frame={frame_count} flip_h={flip_h} flip_v={flip_v} "
-        f"wire={wire_format or 'N/A'}"
-    )
+    fields = [
+        f"bits={effective_bits}",
+        f"bayer={bayer_name}",
+        f"wb_b={wb_gains[0]:.3f}",
+        f"wb_g={wb_gains[1]:.3f}",
+        f"wb_r={wb_gains[2]:.3f}",
+        f"gamma={gamma_value:.3f}",
+        f"stack_count={stack_count}",
+        f"stack={'ON' if stack_enabled else 'OFF'}",
+        f"frame={frame_count}",
+        f"flip_h={flip_h}",
+        f"flip_v={flip_v}",
+        f"wire={wire_format or 'N/A'}",
+    ]
     if shutter_us is not None:
-        meta += f" shutter={shutter_us}us"
+        fields.append(f"shutter={shutter_us}us")
     if gain is not None:
-        meta += f" gain={gain}"
+        fields.append(f"gain={gain}")
+    if telescope:
+        fields.append(f"telescope={telescope}")
+    if obs_filter:
+        fields.append(f"filter={obs_filter}")
+    if mount:
+        fields.append(f"mount={mount}")
+    if object_name:
+        fields.append(f"object={object_name}")
+    if observer:
+        fields.append(f"observer={observer}")
+    if instrument:
+        fields.append(f"instrument={instrument}")
+    meta = "\n" + "\n".join(fields)
     exif_dict = {
         "0th": {
             piexif.ImageIFD.Make: b"rpicam-raw",
@@ -1570,6 +1591,12 @@ def run_raw_live_stack(args):
                 png_info.add_text("FlipV", str(flip_v))
                 if args.wire_format:
                     png_info.add_text("WireFormat", args.wire_format)
+                for _png_key, _attr in [("Telescope", "telescope"), ("Filter", "filter"),
+                                        ("Mount", "mount"), ("Object", "object"),
+                                        ("Observer", "observer"), ("Instrument", "instrument")]:
+                    _v = getattr(args, _attr, None)
+                    if _v:
+                        png_info.add_text(_png_key, str(_v))
                 pil_img = Image.fromarray(cv2.cvtColor(png_frame, cv2.COLOR_BGR2RGB))
                 pil_img.save(fname, "PNG", pnginfo=png_info)
                 print(f"[save] PNG: {fname}  (WB/Gamma適用後, フルサイズ, tEXt付き)")
@@ -1585,6 +1612,12 @@ def run_raw_live_stack(args):
                     args.wire_format, w_j, h_j,
                     shutter_us=_parse_rpicam_param(args.rpicam_cmd, "shutter") if args.rpicam_cmd else None,
                     gain=_parse_rpicam_param(args.rpicam_cmd, "gain") if args.rpicam_cmd else None,
+                    telescope=getattr(args, "telescope", None),
+                    obs_filter=getattr(args, "filter", None),
+                    mount=getattr(args, "mount", None),
+                    object_name=getattr(args, "object", None),
+                    observer=getattr(args, "observer", None),
+                    instrument=getattr(args, "instrument", None),
                 )
                 pil_img = Image.fromarray(cv2.cvtColor(jpg_frame, cv2.COLOR_BGR2RGB))
                 pil_img.save(fname, "JPEG", quality=95, exif=exif_bytes)
@@ -1609,9 +1642,9 @@ def run_raw_live_stack(args):
                         + struct.pack("<I", h_r)
                         + struct.pack("<I", 16)          # PixelDepthPerPlane: 16bit (C実装に合わせ固定)
                         + struct.pack("<I", 0)   # フレーム数: 停止時にパッチ
-                        + f"WB B:{wb_gains[0]:.2f} G:{wb_gains[1]:.2f} R:{wb_gains[2]:.2f} g:{gamma_value:.2f}".encode()[:40].ljust(40, b"\x00")
-                        + f"rpicam-raw {args.wire_format or ''}".encode()[:40].ljust(40, b"\x00")
-                        + f"stk={live_stack.stack_count} {effective_bits}bit {bayer_keys[bayer_idx]}".encode()[:40].ljust(40, b"\x00")
+                        + (getattr(args, "observer", None) or f"WB B:{wb_gains[0]:.2f} G:{wb_gains[1]:.2f} R:{wb_gains[2]:.2f} g:{gamma_value:.2f}").encode()[:40].ljust(40, b"\x00")
+                        + (getattr(args, "instrument", None) or f"rpicam-raw {args.wire_format or ''}").encode()[:40].ljust(40, b"\x00")
+                        + (getattr(args, "telescope", None) or f"stk={live_stack.stack_count} {effective_bits}bit {bayer_keys[bayer_idx]}").encode()[:40].ljust(40, b"\x00")
                         + struct.pack("<q", ticks)
                         + struct.pack("<q", ticks)
                     )
@@ -1656,6 +1689,12 @@ def run_raw_live_stack(args):
                 }
                 if args.wire_format:
                     metadata["WIRE_FMT"] = args.wire_format
+                for _fits_key, _attr in [("TELESCOP", "telescope"), ("FILTER", "filter"),
+                                         ("MOUNT", "mount"), ("OBJECT", "object"),
+                                         ("OBSERVER", "observer"), ("INSTRUME", "instrument")]:
+                    _v = getattr(args, _attr, None)
+                    if _v:
+                        metadata[_fits_key] = _v
                 fname = f"raw_live_stack_frame{frame_count}.fits"
                 if stack_enabled and live_stack.stacked_raw16 is not None:
                     # 累積スタックをuint16 BGRにデベイヤしてフリップを適用
@@ -1829,18 +1868,31 @@ def build_arg_parser():
 
 
 def _load_config(path):
-    """設定JSONを読み込んでdictを返す。"""
+    """設定JSONを読み込んでdictを返す。metaキーがあれば別ファイルをマージする。"""
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            cfg = json.load(f)
     except Exception as e:
         print(f"[config] 読み込み失敗: {path}  ({e})")
         return {}
+    meta_path = cfg.get("meta")
+    if meta_path:
+        base_dir = os.path.dirname(os.path.abspath(path))
+        meta_abs = os.path.join(base_dir, meta_path)
+        try:
+            with open(meta_abs, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            cfg.update({k: v for k, v in meta.items() if not k.startswith("_")})
+            print(f"[config] meta読み込み: {meta_abs}")
+        except Exception as e:
+            print(f"[config] meta読み込み失敗: {meta_abs}  ({e})")
+    return cfg
 
 
 def _save_config(path, args):
     """実効引数をJSON設定ファイルに保存する。"""
-    exclude = {"config", "save_config"}
+    _META_KEYS = {"meta", "telescope", "filter", "mount", "object", "observer", "instrument", "_comment"}
+    exclude = {"config", "save_config"} | _META_KEYS
     d = {k: v for k, v in vars(args).items() if k not in exclude}
     with open(path, "w", encoding="utf-8") as f:
         json.dump(d, f, ensure_ascii=False, indent=2)
@@ -1848,10 +1900,11 @@ def _save_config(path, args):
 
 
 def main():
-    # --config / --save-configだけ先に取り出してJSONを読む
+    # --config / --save-config / --meta だけ先に取り出してJSONを読む
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--config", nargs="?", const="config.json", default=None)
     pre.add_argument("--save-config", default=None)
+    pre.add_argument("--meta", default=None)
     pre_args, _ = pre.parse_known_args()
 
     parser = build_arg_parser()
@@ -1859,6 +1912,8 @@ def main():
                         help="JSON設定ファイルのパス。値省略時は config.json を使用")
     parser.add_argument("--save-config", type=str, default=None,
                         help="実効設定をJSONに保存して終了 (例: imx678.json)")
+    parser.add_argument("--meta", type=str, default=None,
+                        help="観測メタ情報JSONファイルのパス (telescope/filter/mount等)")
 
     if pre_args.config:
         cfg = _load_config(pre_args.config)
@@ -1870,6 +1925,13 @@ def main():
                         action.required = False
             parser.set_defaults(**cfg)
             print(f"[config] 読み込み: {pre_args.config}")
+
+    # --meta はコマンドライン指定が config の "meta" キーより優先
+    if pre_args.meta:
+        meta_cfg = _load_config(pre_args.meta)
+        if meta_cfg:
+            parser.set_defaults(**{k: v for k, v in meta_cfg.items() if not k.startswith("_")})
+            print(f"[config] meta読み込み(CLI): {pre_args.meta}")
 
     args = parser.parse_args()
 

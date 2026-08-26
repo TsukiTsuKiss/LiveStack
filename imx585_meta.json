@@ -1,0 +1,9 @@
+{
+  "_comment": "観測機材・メタ情報（C キーによる自動保存対象外）",
+  "telescope": "SkyWatcher HAC125DX",
+  "filter": "Sightron Quad BP III",
+  "mount": "Vixen AXD",
+  "object": "M42",
+  "observer": "Tsuki",
+  "instrument": "IMX585"
+}
