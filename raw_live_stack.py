@@ -421,7 +421,7 @@ class LiveStack:
         # 加算スタック表示用の固定スケール: 12bitなら /16 で8bitに収める
         # N枚加算するとN倍明るくなり、暗い星が徐々に浮かび上がる
         scale = float(1 << max(0, self.bits - 8))
-        threshold_8 = int(self.brightness_threshold >> max(0, self.bits - 8))
+        max_native = float((1 << self.bits) - 1)  # CCDFと同じクリップ上限
 
         valid_stack_count = 1  # 最新フレームを含む
         stop_reason = None
@@ -448,9 +448,10 @@ class LiveStack:
 
             test_stack = stacked + aligned
 
-            # オーバーフロー判定: 加算値を固定スケールで8bit換算して閾値と比較
-            display_test = np.clip(test_stack / scale, 0, 255)
-            overflow_ratio = float(np.sum(display_test >= threshold_8)) / display_test.size
+            # オーバーフロー判定: CCDFと同じ計算（累積をネイティブ範囲にクリップして比較）
+            overflow_ratio = float(np.mean(
+                np.clip(test_stack, 0.0, max_native) >= float(self.brightness_threshold)
+            ))
             last_overflow_ratio = overflow_ratio
             if overflow_ratio >= self.overflow_ratio_threshold:
                 if self.include_overflow_frame:
@@ -697,21 +698,24 @@ class SettingsMenu:
             return frame
 
         # 半透明の背景（設定項目数に応じて高さを調整）
-        menu_height = 170 + len(self.settings) * 35 + 20
+        menu_h = 120 + len(self.settings) * 35 + 20
+        menu_w = 550
+        x0, y0 = 500, 10
+        x1 = x0 + menu_w
         overlay = frame.copy()
-        cv2.rectangle(overlay, (50, 50), (600, menu_height), (0, 0, 0), -1)
+        cv2.rectangle(overlay, (x0, y0), (x1, y0 + menu_h), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
 
         # タイトル
-        cv2.putText(frame, "Settings Menu", (60, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(frame, "Settings Menu", (x0 + 10, y0 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
         cv2.putText(frame, "Up/Down: Select Item  Left/Right: Change Value",
-                   (60, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+                   (x0 + 10, y0 + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
         cv2.putText(frame, "Left/Right: Apply Immediately  Enter: Re-Apply  ESC: Cancel",
-                   (60, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+                   (x0 + 10, y0 + 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
         # 設定項目を表示
         for i, setting in enumerate(self.settings):
-            y_pos = 170 + i * 35
+            y_pos = y0 + 120 + i * 35
             color = (0, 255, 0) if i == self.selected_item else (255, 255, 255)
 
             # 値のテキスト生成
@@ -737,11 +741,11 @@ class SettingsMenu:
                 value_text = str(setting["value"])
 
             text = f"{setting['name']}: {value_text}"
-            cv2.putText(frame, text, (80, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            cv2.putText(frame, text, (x0 + 30, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
             # 選択中の項目にカーソル表示
             if i == self.selected_item:
-                cv2.putText(frame, ">", (55, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(frame, ">", (x0 + 5, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
         return frame
 
@@ -1215,8 +1219,11 @@ def run_raw_live_stack(args):
         _last_worker_frame_id = [None]     # 同一フレーム再計算を避けるための最後に処理したID
 
         def do_stack_reset():
-            """live_stack.reset() + 表示バッファのクリアを一括実行"""
+            """live_stack.reset() + リングバッファ + 表示バッファのクリアを一括実行"""
             live_stack.reset()
+            live_stack.buffer = [None] * live_stack.max_frames
+            live_stack.buffer_frame_ids = [None] * live_stack.max_frames
+            live_stack.buffer_index = 0
             _stacked_bgr[0] = None
             _last_worker_frame_id[0] = None
 
@@ -1362,30 +1369,13 @@ def run_raw_live_stack(args):
                 stretch_label = "stretch" if auto_stretch else "raw"
                 bayer_name = bayer_keys[bayer_idx]
                 lines = [
-                    f"{args.source}  {src_w}x{src_h}  frame#{frame_count}",
+                    f"{args.source}",
+                    f"{src_w}x{src_h}  frame#{frame_count}",
                     f"{fmt['name'].strip()} | Bayer:{bayer_name} | {stretch_label} | Stack:{'ON' if stack_enabled else 'OFF'}",
                 ]
                 if args.wire_format in ("12u", "10u", "16u"):
                     lines.append(
                         f"{args.wire_format} decode: effective={effective_bits}bit (>>{effective_shift})"
-                    )
-                if stack_enabled:
-                    lines.append(f"Frames: {live_stack.stack_count} / {live_stack.max_frames}")
-                    lines.append(
-                        f"StopReason: {live_stack.last_stop_reason}  lastRatio:{live_stack.last_overflow_ratio * 100:.2f}%"
-                    )
-                    if perf_input_fps[0] > 0.0 or perf_stack_hz[0] > 0.0:
-                        lag_frames = 0
-                        if live_stack.last_processed_frame_id is not None:
-                            lag_frames = max(0, frame_count - int(live_stack.last_processed_frame_id))
-                        util = 0.0
-                        if perf_input_fps[0] > 1e-6:
-                            util = perf_stack_hz[0] / perf_input_fps[0]
-                        lines.append(
-                            f"Perf InFPS:{perf_input_fps[0]:.2f}  StackHz:{perf_stack_hz[0]:.2f}  StackMs:{perf_stack_ms[0]:.0f}  Util:{util:.2f}x  Lag:{lag_frames}frm"
-                        )
-                    lines.append(
-                        f"StopMode: {'include-crossing-frame' if live_stack.include_overflow_frame else 'exclude-crossing-frame'}"
                     )
                 lines.append(
                     f"WB B:{wb_gains[0]:.2f} G:{wb_gains[1]:.2f} R:{wb_gains[2]:.2f} | Gamma:{gamma_value:.2f} | click:{'ON' if click_wb_mode else 'OFF'}"
@@ -1399,7 +1389,7 @@ def run_raw_live_stack(args):
                         lines.append(f"stretch[{s_lo:.0f} - {s_hi:.0f}]")
                     print(f"[frame#{frame_count}] {'  '.join(lines[2:])}")
                 if stack_enabled:
-                    # CCDFと同じネイティブbit深度データ基準でNow比率を計算する。
+                    # Now比率を計算（CCDFと同じネイティブbit深度データ基準）
                     if native_stats is not None:
                         current_ratio = compute_white_ratio_native(
                             native_stats,
@@ -1412,9 +1402,27 @@ def run_raw_live_stack(args):
                         )
                     else:
                         current_ratio = 0.0
+                    lines.append("---")
+                    lines.append(f"Frames: {live_stack.stack_count} / {live_stack.max_frames}")
                     lines.append(
                         f"Now: {current_ratio * 100:.2f}% / Stop@>= {live_stack.overflow_ratio_threshold * 100:.2f}%  Thresh:{live_stack.brightness_threshold}"
                     )
+                    lines.append(
+                        f"StopReason: {live_stack.last_stop_reason}  lastRatio:{live_stack.last_overflow_ratio * 100:.2f}%"
+                    )
+                    lines.append(
+                        f"StopMode: {'include-crossing-frame' if live_stack.include_overflow_frame else 'exclude-crossing-frame'}"
+                    )
+                    if perf_input_fps[0] > 0.0 or perf_stack_hz[0] > 0.0:
+                        lag_frames = 0
+                        if live_stack.last_processed_frame_id is not None:
+                            lag_frames = max(0, frame_count - int(live_stack.last_processed_frame_id))
+                        util = 0.0
+                        if perf_input_fps[0] > 1e-6:
+                            util = perf_stack_hz[0] / perf_input_fps[0]
+                        lines.append(
+                            f"Perf InFPS:{perf_input_fps[0]:.2f}  StackHz:{perf_stack_hz[0]:.2f}  StackMs:{perf_stack_ms[0]:.0f}  Util:{util:.2f}x  Lag:{lag_frames}frm"
+                        )
                 draw_info_lines(preview_frame, lines)
 
             if info_display and show_hist:
@@ -1650,13 +1658,17 @@ def run_raw_live_stack(args):
                     metadata["WIRE_FMT"] = args.wire_format
                 fname = f"raw_live_stack_frame{frame_count}.fits"
                 if stack_enabled and live_stack.stacked_raw16 is not None:
-                    # raw16空間で加算したスタックをN枚平均してuint16 RGBで保存
-                    n = max(1, live_stack.stack_count)
-                    max_native = (1 << effective_bits) - 1
-                    avg16 = np.clip(live_stack.stacked_raw16 / n, 0, max_native).astype(np.uint16)
-                    bgr16 = cv2.cvtColor(avg16, bayer_code)  # uint16 BGR
+                    # 累積スタックをuint16 BGRにデベイヤしてフリップを適用
+                    stk_u16 = np.clip(live_stack.stacked_raw16, 0, 65535).astype(np.uint16)
+                    bgr16 = cv2.cvtColor(stk_u16, bayer_code)
+                    if flip_h and flip_v:
+                        bgr16 = cv2.flip(bgr16, -1)
+                    elif flip_h:
+                        bgr16 = cv2.flip(bgr16, 1)
+                    elif flip_v:
+                        bgr16 = cv2.flip(bgr16, 0)
                     save_fits(bgr16, fname, metadata)
-                    print(f"[save] FITS (uint16 stacked): {fname}")
+                    print(f"[save] FITS (uint16 BGR stacked sum, {live_stack.stack_count}frm): {fname}")
                 else:
                     save_fits(save_frame, fname, metadata)
             elif key == ord("a"):
