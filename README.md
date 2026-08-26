@@ -154,6 +154,8 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - `d`: ダークフレーム取得（レンズキャップして押す、複数回で加算平均）
 - `D`: ダークフレームクリア（終了時に保存されなくなる）
 - `C`: 設定をJSONに保存（`--config` 指定時はそのパス、未指定時は `config.json`）
+- `S`: SER録画開始/停止トグル
+- `z`: フォーカスアシストズーム ON/OFF（ON中にクリック/ドラッグで拡大エリアを選択）
 
 **SSH連携オプション（CLIまたはJSONで指定）:**
 - `--ssh-host <IP>`: Pi側ホスト。指定時に起動・終了を自動制御
@@ -161,6 +163,11 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - `--ssh-key <path>`: SSH秘密鍵パス（デフォルト: `~/.ssh/id_rsa`）
 - `--rpicam-cmd <cmd>`: Pi側で実行するコマンド（`--listen -o tcp://...` は自動補完）
 - `--no-ssh`: JSONに `ssh_host` が設定されていても手動起動モードで接続
+
+**ズームフォーカスアシストオプション（CLIまたはJSONで指定）:**
+- `--zoom-pip-size <px>`: PiP表示サイズ（デフォルト: `640`）
+- `--zoom-click-size <px>`: クリック時に切り出す元解像度ピクセル数（デフォルト: `128`、倍率 = pip_size ÷ click_size）
+- `--zoom-corner <tl|tr|bl|br>`: PiP配置隅（`tl`=左上 / `tr`=右上 / `bl`=左下 / `br`=右下、デフォルト: `br`）
 
 ### 2. Live Stack (`live_stack.py`)
 リアルタイムでフレームを加算スタックし、ノイズ軽減と画質向上を実現するプレビューアプリケーション（カメラ切り替え機能付き）。
@@ -365,6 +372,13 @@ pip install -r requirements.txt
 ```
 
 ## 変更履歴
+
+#### 2026/08/26 raw_live_stack.py: フォーカスアシストズーム機能追加
+- **`[z]`キーでフォーカスアシストズーム ON/OFF**: ON中はクリックまたはドラッグでPiP表示エリアを選択。
+- **元解像度クロップ**: 縮小済みプレビューでなく `display_frame`（縮小前のフル解像度）から切り出し、WB/ガンマを適用後に `pip_size` へ拡大表示。
+- **クリック**: `zoom_click_size` 原解像度画素を中心から切り出し（デフォルト: 128px、`pip_size=640` なら 5倍相当）。
+- **ドラッグ**: ドラッグ範囲を元解像度座標に逆マップして切り出し。
+- **設定化**: `zoom_pip_size`/`zoom_click_size`/`zoom_corner`（`tl`/`tr`/`bl`/`br`）をJSONまたはCLIで指定可能。
 
 #### 2026/08/25 live_view.py / raw_live_view.py 削除
 - **ビューワーファイル削除**: `live_stack.py` / `raw_live_stack.py` の機能が上位互換なため不要になった `live_view.py` と `raw_live_view.py` を削除。

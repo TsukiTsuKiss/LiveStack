@@ -47,6 +47,7 @@ import socket
 import sys
 import threading
 import time
+import traceback
 
 import cv2
 import numpy as np
@@ -78,6 +79,7 @@ from raw_utils import (
 
 PREVIEW_WINDOW_NAME = "RAW Live Stack"
 WB_WINDOW_NAME = "RAW Stack WB"
+ZOOM_WINDOW_NAME = "RAW Live Stack - Zoom"
 
 
 # ---------------------------------------------------------------------------
@@ -1150,6 +1152,10 @@ def run_raw_live_stack(args):
         gamma_value = 0.80
         gamma_adjust_mode = False
         click_wb_mode = False
+        zoom_mode = False
+        zoom_rect = [None]       # (px1, py1, px2, py2) プレビュー座標
+        _zoom_from_drag = [False]   # True=ドラッグ選択、False=クリック選択
+        _zoom_drag = {"start": None, "dragging": False, "current": None}
 
         def slider_to_gain(v):
             return v / 100.0
@@ -1177,8 +1183,27 @@ def run_raw_live_stack(args):
         if args.gamma is not None:
             cv2.setTrackbarPos("Gamma x100", WB_WINDOW_NAME, gamma_to_slider(args.gamma))
 
-        def on_wb_click(event, x, y, flags, param):
-            if event == cv2.EVENT_LBUTTONDOWN and click_wb_mode:
+        def on_mouse(event, x, y, flags, param):
+            if zoom_mode:
+                if event == cv2.EVENT_LBUTTONDOWN:
+                    _zoom_drag["start"] = (x, y)
+                    _zoom_drag["dragging"] = True
+                    _zoom_drag["current"] = (x, y)
+                elif event == cv2.EVENT_MOUSEMOVE and _zoom_drag["dragging"]:
+                    _zoom_drag["current"] = (x, y)
+                elif event == cv2.EVENT_LBUTTONUP and _zoom_drag["dragging"]:
+                    _zoom_drag["dragging"] = False
+                    x0, y0 = _zoom_drag["start"]
+                    x1, y1 = x, y
+                    if abs(x1 - x0) < 8 and abs(y1 - y0) < 8:
+                        # クリック: zoom_click_size 原解像度画素を中心から切り出す
+                        half = args.zoom_click_size // 2
+                        zoom_rect[0] = (x0 - half, y0 - half, x0 + half, y0 + half)
+                        _zoom_from_drag[0] = False
+                    else:
+                        zoom_rect[0] = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+                        _zoom_from_drag[0] = True
+            elif event == cv2.EVENT_LBUTTONDOWN and click_wb_mode:
                 base = display_frame_ref[0]
                 if base is None:
                     return
@@ -1197,7 +1222,7 @@ def run_raw_live_stack(args):
 
         display_frame_ref = [None]   # クリックWBのためにdisplay_frame参照を保持
         preview_size_ref = [(disp_w, disp_h)]
-        cv2.setMouseCallback(PREVIEW_WINDOW_NAME, on_wb_click)
+        cv2.setMouseCallback(PREVIEW_WINDOW_NAME, on_mouse)
 
         print("\n操作: [q]終了  [m]設定メニュー  [i]情報表示  [s]PNG保存  [r]NPY保存  [f]FITS保存")
         print("       [n]次候補フォーマット  [+/-]skip±1行  [a]ストレッチ切替  [b]Bayer切替")
@@ -1493,6 +1518,68 @@ def run_raw_live_stack(args):
                     (10, preview_frame.shape[0] - 14 - i * 22),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 220), 1, cv2.LINE_AA)
 
+            # --- ズーム PiP 描画 ---
+            if zoom_mode:
+                try:
+                    if _zoom_drag["dragging"] and _zoom_drag["start"] and _zoom_drag["current"]:
+                        cv2.rectangle(preview_frame,
+                                      _zoom_drag["start"], _zoom_drag["current"],
+                                      (0, 255, 255), 1)
+                    if zoom_rect[0] is not None:
+                        ph, pw = preview_frame.shape[:2]
+                        dh, dw = display_frame.shape[:2]
+
+                        if _zoom_from_drag[0]:
+                            # ドラッグ: プレビュー座標を元解像度座標に直接マップ
+                            dx1 = max(0, round(zoom_rect[0][0] * dw / pw))
+                            dy1 = max(0, round(zoom_rect[0][1] * dh / ph))
+                            dx2 = min(dw, round(zoom_rect[0][2] * dw / pw))
+                            dy2 = min(dh, round(zoom_rect[0][3] * dh / ph))
+                        else:
+                            # クリック: zoom_click_size 原解像度画素を中心から切り出す
+                            cx_p = (zoom_rect[0][0] + zoom_rect[0][2]) // 2
+                            cy_p = (zoom_rect[0][1] + zoom_rect[0][3]) // 2
+                            cx_d = int(cx_p * dw / pw)
+                            cy_d = int(cy_p * dh / ph)
+                            half = args.zoom_click_size // 2
+                            dx1 = max(0, min(cx_d - half, dw - args.zoom_click_size))
+                            dy1 = max(0, min(cy_d - half, dh - args.zoom_click_size))
+                            dx2 = min(dw, dx1 + args.zoom_click_size)
+                            dy2 = min(dh, dy1 + args.zoom_click_size)
+
+                        # プレビュー上に選択枠を表示（元座標を逆変換）
+                        rx1 = max(0, round(dx1 * pw / dw))
+                        ry1 = max(0, round(dy1 * ph / dh))
+                        rx2 = min(pw, round(dx2 * pw / dw))
+                        ry2 = min(ph, round(dy2 * ph / dh))
+                        cv2.rectangle(preview_frame, (rx1, ry1), (rx2, ry2), (0, 255, 255), 1)
+
+                        if dx2 > dx1 and dy2 > dy1:
+                            # 元解像度クロップに WB+gamma を適用（小領域なので低コスト）
+                            pip_crop = display_frame[dy1:dy2, dx1:dx2]
+                            pip_crop = apply_white_balance(pip_crop, wb_gains)
+                            pip_crop = apply_gamma_correction(pip_crop, gamma_value)
+
+                            # pip_size に拡大（常に 1倍以上）
+                            pip_s = args.zoom_pip_size
+                            scale_f = max(1.0, min(8.0,
+                                pip_s / max(1, max(pip_crop.shape[0], pip_crop.shape[1]))))
+                            new_w = max(1, round(pip_crop.shape[1] * scale_f))
+                            new_h = max(1, round(pip_crop.shape[0] * scale_f))
+                            zoomed = cv2.resize(pip_crop, (new_w, new_h),
+                                                interpolation=cv2.INTER_NEAREST)
+                            zh, zw = zoomed.shape[:2]
+                            margin = 8
+                            corner = args.zoom_corner
+                            ox = margin if corner in ("tl", "bl") else pw - zw - margin
+                            oy = margin if corner in ("tl", "tr") else ph - zh - margin
+                            if ox >= 0 and oy >= 0:
+                                cv2.rectangle(preview_frame, (ox - 1, oy - 1), (ox + zw, oy + zh), (0, 255, 255), 1)
+                                preview_frame[oy:oy + zh, ox:ox + zw] = zoomed
+                except Exception as _e:
+                    print(f"[zoom error] {_e}")
+                    traceback.print_exc()
+
             cv2.imshow(PREVIEW_WINDOW_NAME, preview_frame)
 
             # --- キー入力 ---
@@ -1522,6 +1609,14 @@ def run_raw_live_stack(args):
 
             if key == ord("q"):
                 break
+            elif key == ord("z"):
+                zoom_mode = not zoom_mode
+                if not zoom_mode:
+                    zoom_rect[0] = None
+                    _zoom_from_drag[0] = False
+                    _zoom_drag["start"] = None
+                    _zoom_drag["dragging"] = False
+                print(f"[zoom] {'ON' if zoom_mode else 'OFF'}")
             elif key == ord("w"):
                 click_wb_mode = not click_wb_mode
                 print(f"[wb] 白点クリックWB: {'ON' if click_wb_mode else 'OFF'}")
@@ -1854,6 +1949,12 @@ def build_arg_parser():
     parser.add_argument("--wb-g", type=float, default=None, help="初期WBゲイン G (デフォルト: 1.0)")
     parser.add_argument("--wb-r", type=float, default=None, help="初期WBゲイン R (デフォルト: 1.0)")
     parser.add_argument("--gamma", type=float, default=None, help="初期ガンマ値 (デフォルト: 0.80)")
+    parser.add_argument("--zoom-pip-size", type=int, default=640,
+                        help="ズームPiP表示サイズ（px、デフォルト: 640）")
+    parser.add_argument("--zoom-click-size", type=int, default=128,
+                        help="ズームクリック選択サイズ（px、デフォルト: 128）")
+    parser.add_argument("--zoom-corner", default="br", choices=["tl", "tr", "bl", "br"],
+                        help="PiP配置隅: tl=左上 / tr=右上 / bl=左下 / br=右下 (デフォルト: br)")
     parser.add_argument("--ssh-host", type=str, default=None,
                         help="SSH接続先ホスト。指定時にPi側でrpicam-rawを自動起動する")
     parser.add_argument("--ssh-user", type=str, default="pi",
