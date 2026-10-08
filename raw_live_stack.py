@@ -207,9 +207,23 @@ class LiveStack:
         self.reset()
         self.buffer = [None] * max_frames  # Noneで初期化
         self.buffer_frame_ids = [None] * max_frames  # 各バッファ要素に対応するフレーム番号
+        self.buffer_pos = [None] * max_frames  # 各フレームの基準座標系での位置(x,y) raw px・float
+        self._ref_img = None  # ズレ検出の基準(キーフレーム)画像
+        self._ref_pos = (0.0, 0.0)  # 基準フレームの位置
+        self._last_pos = (0.0, 0.0)  # 直近フレームの位置
+        self._last_vel = (0.0, 0.0)  # 直近のフレーム間移動量(検出失敗時の外挿用)
+        self._reject_count = 0  # 異常値として捨てた連続回数
+        self.align_max_jump = 10.0  # 予測位置からこれ以上外れた検出は異常値(raw px)
+        self._hann = {}
+        self.align_ratio = 0.5  # ずれ検出窓の大きさ（画像幅/高さに対する比率）
+        self.align_min_response = 0.05  # phaseCorrelateの応答がこれ未満なら検出失敗
+        self.last_align_ms = 0.0  # 直近のずれ検出にかかった時間
         self.buffer_index = 0
         self.dark_frame = None  # d キーで取得するまでは None（サイズを動的に合わせるため）
         self.dark_buffer = []  # ダークフレーム用リングバッファ
+        self.hot_sigma = 10.0  # ホットピクセル判定のしきい値(σ倍)。0以下で無効
+        self._hot_fix = None  # (idx, nb_idx(4,n), nb_valid(4,n)) ホットピクセル補間用の索引
+        self._hot_mask = None  # ホットピクセルのboolマスク(ダークと同形状)
 
     def reset(self):
         """スタック状態をリセット"""
@@ -370,9 +384,82 @@ class LiveStack:
 
     def add_to_buffer(self, frame, frame_id=None):
         """リングバッファにフレームを追加"""
+        t0 = time.perf_counter()
+        cur = self._prepare_align_image(frame)
+        pos = self._last_pos
+        if self._ref_img is not None and self._ref_img.shape == cur.shape:
+            d = self._detect_shift(self._ref_img, cur)
+            pred = (self._last_pos[0] + self._last_vel[0], self._last_pos[1] + self._last_vel[1])
+            if d is not None:
+                cand = (self._ref_pos[0] + d[0], self._ref_pos[1] + d[1])
+                # 予測から大きく外れた検出は誤検出として捨てる（連続したら再ロックとして受け入れる）
+                if max(abs(cand[0] - pred[0]), abs(cand[1] - pred[1])) > self.align_max_jump and self._reject_count < 5:
+                    d = None
+                    self._reject_count += 1
+            if d is None:
+                pos = pred
+                print(f"[align] ずれ検出失敗/異常値 (frame {frame_id}): 前回の移動量で外挿します")
+            else:
+                relock = self._reject_count >= 5
+                self._reject_count = 0
+                pos = cand
+                self._last_vel = (0.0, 0.0) if relock else (pos[0] - self._last_pos[0], pos[1] - self._last_pos[1])
+                # 基準から離れすぎたら基準を付け替える（重なりを確保しつつ誤差の積み重ねをキーフレーム数に抑える）
+                if max(abs(d[0]), abs(d[1])) > 0.1 * min(cur.shape) * 2:
+                    self._ref_img = cur
+                    self._ref_pos = pos
+        else:
+            pos = (self._last_pos[0] + self._last_vel[0], self._last_pos[1] + self._last_vel[1])
+            self._ref_img = cur
+            self._ref_pos = pos
+        self._last_pos = pos
+        self.last_align_ms = (time.perf_counter() - t0) * 1000.0
+
         self.buffer[self.buffer_index] = frame
         self.buffer_frame_ids[self.buffer_index] = frame_id
+        self.buffer_pos[self.buffer_index] = pos
         self.buffer_index = (self.buffer_index + 1) % self.max_frames
+
+    def clear_buffer(self):
+        """リングバッファとずれ検出状態を破棄する。"""
+        self.buffer = [None] * self.max_frames
+        self.buffer_frame_ids = [None] * self.max_frames
+        self.buffer_pos = [None] * self.max_frames
+        self.buffer_index = 0
+        self._ref_img = None
+        self._ref_pos = (0.0, 0.0)
+        self._last_pos = (0.0, 0.0)
+        self._last_vel = (0.0, 0.0)
+        self._reject_count = 0
+    def _prepare_align_image(self, raw16):
+        """中央の窓をダーク減算→2x2ビニング→背景除去して、ずれ検出用画像を作る。"""
+        h, w = raw16.shape[:2]
+        sh = max(64, int(h * self.align_ratio)) // 2 * 2
+        sw = max(64, int(w * self.align_ratio)) // 2 * 2
+        sh, sw = min(sh, h // 2 * 2), min(sw, w // 2 * 2)
+        y0 = (h - sh) // 2 // 2 * 2
+        x0 = (w - sw) // 2 // 2 * 2
+        crop = raw16[y0:y0 + sh, x0:x0 + sw].astype(np.float32)
+        if self.dark_frame is not None:
+            crop -= self.dark_frame[y0:y0 + sh, x0:x0 + sw]
+        if self._hot_mask is not None and self._hot_mask.shape == raw16.shape[:2]:
+            crop[self._hot_mask[y0:y0 + sh, x0:x0 + sw]] = 0
+        binned = crop.reshape(sh // 2, 2, sw // 2, 2).sum(axis=(1, 3))
+        binned = cv2.GaussianBlur(binned, (0, 0), 1.0)
+        return binned - cv2.GaussianBlur(binned, (0, 0), 16)
+
+    def _detect_shift(self, prev, cur):
+        """prev→curの移動量(dx,dy)をraw pxのfloat(サブピクセル)で返す。失敗時はNone。"""
+        hh, ww = cur.shape
+        win = self._hann.get((ww, hh))
+        if win is None:
+            win = self._hann[(ww, hh)] = cv2.createHanningWindow((ww, hh), cv2.CV_32F)
+        # phaseCorrelateは入力に窓関数を書き込むため、基準画像を保つにはコピーを渡す
+        (dx, dy), response = cv2.phaseCorrelate(prev.copy(), cur.copy(), win)
+        if response < self.align_min_response:
+            return None
+        # ビニング後pxを2倍 = raw px。偶数への丸めは累積後に行う
+        return dx * 2.0, dy * 2.0
 
     def get_latest_frame_id(self):
         """現在バッファにある最新フレームIDを返す。"""
@@ -387,32 +474,49 @@ class LiveStack:
 
         old_buffer = self.buffer
         old_ids = self.buffer_frame_ids
+        old_deltas = self.buffer_pos
         old_len = len(old_buffer)
 
         # 旧リングバッファを時系列順（古い→新しい）に展開
         ordered = []
         ordered_ids = []
+        ordered_deltas = []
         for i in range(old_len):
             idx = (self.buffer_index + i) % old_len
             f = old_buffer[idx]
             if f is not None:
                 ordered.append(f)
-            ordered_ids.append(old_ids[idx])
+                ordered_ids.append(old_ids[idx])
+                ordered_deltas.append(old_deltas[idx])
 
         # 最新フレームを優先して保持
         ordered = ordered[-new_max_frames:]
         ordered_ids = ordered_ids[-new_max_frames:]
+        ordered_deltas = ordered_deltas[-new_max_frames:]
 
         self.max_frames = new_max_frames
         self.buffer = [None] * new_max_frames
         self.buffer_frame_ids = [None] * new_max_frames
+        self.buffer_pos = [None] * new_max_frames
         for i, f in enumerate(ordered):
             self.buffer[i] = f
             self.buffer_frame_ids[i] = ordered_ids[i]
+            self.buffer_pos[i] = ordered_deltas[i]
         self.buffer_index = len(ordered) % new_max_frames
 
         if len(self.dark_buffer) > new_max_frames:
             self.dark_buffer = self.dark_buffer[-new_max_frames:]
+
+    def _warp_bayer(self, img, dx, dy):
+        """Bayer画像をraw pxで(dx,dy)移動する。4色面ごとにdx/2,dy/2のサブピクセル移動を行う。"""
+        h, w = img.shape
+        out = np.empty_like(img)
+        M = np.float32([[1, 0, dx / 2.0], [0, 1, dy / 2.0]])
+        for oy in (0, 1):
+            for ox in (0, 1):
+                plane = np.ascontiguousarray(img[oy::2, ox::2])
+                out[oy::2, ox::2] = cv2.warpAffine(plane, M, (plane.shape[1], plane.shape[0]), flags=cv2.INTER_LINEAR)
+        return out
 
     def process_stack(self, bayer_code):
         """スタック処理を実行（バッファはraw16 uint16 Bayerで保持）"""
@@ -428,18 +532,11 @@ class LiveStack:
         latest_f32 = self.buffer[latest_index].astype(np.float32)
         if self.dark_frame is not None:
             latest_f32 = np.clip(latest_f32 - self.dark_frame, 0, None)
+            self._fix_hot(latest_f32)
 
         stacked = latest_f32.copy()  # float32 raw16 Bayerの累積スタック
 
-        # テンプレートマッチング用: raw16を正規化8bitに変換（暗い星も検出可能にする）
-        def to_match8(f32):
-            mn, mx = float(f32.min()), float(f32.max())
-            if mx <= mn:
-                return np.zeros(f32.shape, dtype=np.uint8)
-            return ((f32 - mn) / (mx - mn) * 255).astype(np.uint8)
-
         h, w = latest_f32.shape[:2]
-        latest_match8 = cv2.GaussianBlur(to_match8(latest_f32), (3, 3), 0)
 
         # 加算スタック表示用の固定スケール: 12bitなら /16 で8bitに収める
         # N枚加算するとN倍明るくなり、暗い星が徐々に浮かび上がる
@@ -449,6 +546,8 @@ class LiveStack:
         valid_stack_count = 1  # 最新フレームを含む
         stop_reason = None
         last_overflow_ratio = 0.0
+        cum_x = cum_y = 0.0  # 最新フレームに対する過去フレームのずれ(float)
+        latest_pos = self.buffer_pos[latest_index] or (0.0, 0.0)
         for i in range(self.max_frames - 1):
             past_index = (self.buffer_index - 2 - i + self.max_frames) % self.max_frames
             past_raw16 = self.buffer[past_index]
@@ -459,15 +558,13 @@ class LiveStack:
             past_f32 = past_raw16.astype(np.float32)
             if self.dark_frame is not None:
                 past_f32 = np.clip(past_f32 - self.dark_frame, 0, None)
+                self._fix_hot(past_f32)
 
-            past_match8 = cv2.GaussianBlur(to_match8(past_f32), (3, 3), 0)
-
-            # テンプレートマッチングで位置ずれを検出
-            result = cv2.matchTemplate(past_match8, latest_match8, cv2.TM_CCOEFF_NORMED)
-            _, _mv, _, max_loc = cv2.minMaxLoc(result)
-            offset_x, offset_y = max_loc
-            M = np.float32([[1, 0, offset_x], [0, 1, offset_y]])
-            aligned = cv2.warpAffine(past_f32, M, (w, h))
+            past_pos = self.buffer_pos[past_index] or latest_pos
+            cum_x = latest_pos[0] - past_pos[0]
+            cum_y = latest_pos[1] - past_pos[1]
+            # Bayer色ごとの面を別々にサブピクセルでずらす（色配列を壊さない）
+            aligned = self._warp_bayer(past_f32, cum_x, cum_y)
 
             test_stack = stacked + aligned
 
@@ -506,6 +603,47 @@ class LiveStack:
         bayer8 = np.clip(stacked / scale, 0, 255).astype(np.uint8)
         return cv2.cvtColor(bayer8, bayer_code)
 
+    def build_hot_mask(self):
+        """ダークから、同色近傍の中央値より突出した画素を求め、補間用の索引を作る。"""
+        self._hot_fix = None
+        self._hot_mask = None
+        d = self.dark_frame
+        if d is None or self.hot_sigma <= 0:
+            return
+        h, w = d.shape
+        if h % 2 or w % 2:
+            return
+        resid = np.empty_like(d)
+        for oy in (0, 1):
+            for ox in (0, 1):
+                p = np.ascontiguousarray(d[oy::2, ox::2])
+                resid[oy::2, ox::2] = p - cv2.medianBlur(p, 3)
+        med = float(np.median(resid))
+        sigma = max(1.4826 * float(np.median(np.abs(resid - med))), 0.5)
+        mask = resid > med + self.hot_sigma * sigma
+        ys, xs = np.nonzero(mask)
+        if len(ys) == 0:
+            print("[dark] ホットピクセルなし")
+            return
+        nb = []
+        valid = []
+        for dy, dx in ((0, -2), (0, 2), (-2, 0), (2, 0)):
+            ny = np.clip(ys + dy, 0, h - 1)
+            nx = np.clip(xs + dx, 0, w - 1)
+            nb.append(ny * w + nx)
+            valid.append((~mask[ny, nx]).astype(np.float32))
+        self._hot_fix = (ys * w + xs, np.array(nb), np.array(valid))
+        self._hot_mask = mask
+        print(f"[dark] ホットピクセル {len(ys)}個 ({len(ys) / mask.size * 100:.3f}%) を補間対象にしました (sigma={sigma:.2f}, {self.hot_sigma:g}σ)")
+
+    def _fix_hot(self, f32):
+        """ホットピクセルを同色の上下左右(2px離れ)の平均で置き換える。f32は連続配列。"""
+        if self._hot_fix is None:
+            return
+        idx, nb, valid = self._hot_fix
+        flat = f32.reshape(-1)
+        flat[idx] = (flat[nb] * valid).sum(axis=0) / np.maximum(valid.sum(axis=0), 1.0)
+
     def set_dark_frame(self, raw16_frame):
         """ダークフレームを加算平均して設定（raw16 uint16 Bayer入力）"""
         if len(self.dark_buffer) >= self.max_frames:
@@ -515,6 +653,7 @@ class LiveStack:
         # 加算平均を計算（raw16空間のまま保持）
         dark_sum = np.sum(self.dark_buffer, axis=0)
         self.dark_frame = dark_sum / len(self.dark_buffer)  # float32 raw16 Bayer
+        self.build_hot_mask()
         print(f"ダークフレームを更新しました。現在の平均化フレーム数: {len(self.dark_buffer)}")
 
 
@@ -594,6 +733,13 @@ class SettingsMenu:
                 "min": 1,
                 "max": 50,
                 "step": 1
+            },
+            {
+                "name": "Align Size(%)",
+                "value": 50,
+                "min": 10,
+                "max": 100,
+                "step": 10
             }
         ]
         self.selected_item = 0
@@ -703,6 +849,10 @@ class SettingsMenu:
             new_value = setting["value"] + (direction * setting["step"])
             setting["value"] = max(setting["min"], min(setting["max"], new_value))
 
+        elif setting["name"] == "Align Size(%)":
+            new_value = setting["value"] + (direction * setting["step"])
+            setting["value"] = max(setting["min"], min(setting["max"], new_value))
+
     def get_exposure_text(self, exposure_us):
         """露出時間をわかりやすいテキストに変換"""
         if exposure_us >= 1000000:  # 1秒以上
@@ -754,6 +904,8 @@ class SettingsMenu:
                 value_text = "ON" if setting["value"] else "OFF"
             elif setting["name"] == "Stop Ratio(%)":
                 value_text = f"{int(setting['value'])}%"
+            elif setting["name"] == "Align Size(%)":
+                value_text = f"{int(setting['value'])}%"
             elif setting["name"] == "Stop Threshold":
                 value_text = f"{int(setting['value'])}"
             elif setting["name"] == "Max Frames" and "max" in setting:
@@ -785,9 +937,10 @@ class SettingsMenu:
             "info_display": bool(values_by_name.get("Info Display", True)),
             "stop_threshold": int(values_by_name.get("Stop Threshold", 255)),
             "stop_ratio_percent": int(values_by_name.get("Stop Ratio(%)", 10)),
+            "align_size_percent": int(values_by_name.get("Align Size(%)", 50)),
         }
 
-    def set_current_values(self, camera, gain, exposure, max_frames, stack_mode, info_display=True, size_label="N/A", stop_ratio_percent=10, stop_threshold=255):
+    def set_current_values(self, camera, gain, exposure, max_frames, stack_mode, info_display=True, size_label="N/A", stop_ratio_percent=10, stop_threshold=255, align_size_percent=50):
         """現在の設定値を更新"""
         values = {
             "Camera": camera,
@@ -799,6 +952,7 @@ class SettingsMenu:
             "Info Display": info_display,
             "Stop Threshold": int(stop_threshold),
             "Stop Ratio(%)": int(stop_ratio_percent),
+            "Align Size(%)": int(align_size_percent),
         }
 
         for setting in self.settings:
@@ -807,7 +961,7 @@ class SettingsMenu:
                 continue
 
             value = values[name]
-            if name in ["Stop Threshold", "Stop Ratio(%)"] and "min" in setting and "max" in setting:
+            if name in ["Stop Threshold", "Stop Ratio(%)", "Align Size(%)"] and "min" in setting and "max" in setting:
                 value = max(setting["min"], min(setting["max"], int(value)))
 
             setting["value"] = value
@@ -1100,17 +1254,20 @@ def run_raw_live_stack(args):
         if max_frames < args.max_frames:
             print(f"[warn] --max-frames {args.max_frames} はメモリ見積もり上限を超えるため {max_frames} にクランプしました")
         live_stack = LiveStack(max_frames=max_frames, verbose=False, bits=effective_bits)
+        live_stack.hot_sigma = args.hot_sigma
         if _preloaded_dark is not None:
             live_stack.dark_frame = _preloaded_dark
             # dark_bufferにダミーを積んでDARK_CNTを保持する（終了時の再保存で枚数が失われないよう）
             live_stack.dark_buffer = [_preloaded_dark] * _preloaded_dark_count
+            live_stack.build_hot_mask()
         if args.stop_threshold is not None:
             live_stack.brightness_threshold = max(1, min((1 << effective_bits) - 1, args.stop_threshold))
         if args.stop_ratio is not None:
             live_stack.overflow_ratio_threshold = max(0.01, min(0.50, args.stop_ratio / 100.0))
+        live_stack.align_ratio = max(0.1, min(1.0, args.align_size / 100.0))
 
         settings_menu = SettingsMenu()
-        stream_menu_names = {"Max Frames", "Stack Mode", "Info Display", "Stop Threshold", "Stop Ratio(%)"}        
+        stream_menu_names = {"Max Frames", "Stack Mode", "Info Display", "Stop Threshold", "Stop Ratio(%)", "Align Size(%)"}        
         # Stop Threshold の範囲をビット深度に合わせて更新
         max_val = (1 << effective_bits) - 1
         for _s in settings_menu.settings:
@@ -1135,6 +1292,7 @@ def run_raw_live_stack(args):
             size_label="N/A",
             stop_ratio_percent=int(live_stack.overflow_ratio_threshold * 100),
             stop_threshold=live_stack.brightness_threshold,
+            align_size_percent=int(round(live_stack.align_ratio * 100)),
         )
 
         screen_size = get_screen_size()
@@ -1267,9 +1425,7 @@ def run_raw_live_stack(args):
         def do_stack_reset():
             """live_stack.reset() + リングバッファ + 表示バッファのクリアを一括実行"""
             live_stack.reset()
-            live_stack.buffer = [None] * live_stack.max_frames
-            live_stack.buffer_frame_ids = [None] * live_stack.max_frames
-            live_stack.buffer_index = 0
+            live_stack.clear_buffer()
             _stacked_bgr[0] = None
             _last_worker_frame_id[0] = None
 
@@ -1300,7 +1456,7 @@ def run_raw_live_stack(args):
                 perf_stack_ms[0] = ema(perf_stack_ms[0], elapsed_ms)
                 if elapsed_ms > 0.0:
                     perf_stack_hz[0] = ema(perf_stack_hz[0], 1000.0 / elapsed_ms)
-                print(f"[perf] process_stack: {(_t1 - _t0) * 1000:.0f}ms  frames={live_stack.stack_count}")
+                print(f"[perf] process_stack: {(_t1 - _t0) * 1000:.0f}ms  align: {live_stack.last_align_ms:.0f}ms  frames={live_stack.stack_count}")
                 if result is not None:
                     _stacked_bgr[0] = result
                     _last_worker_frame_id[0] = latest_id
@@ -1605,6 +1761,7 @@ def run_raw_live_stack(args):
                         print(f"情報表示: {'ON' if info_display else 'OFF'}")
                     live_stack.overflow_ratio_threshold = max(0.01, min(0.50, values["stop_ratio_percent"] / 100.0))
                     live_stack.brightness_threshold = max(1, min((1 << live_stack.bits) - 1, values["stop_threshold"]))
+                    live_stack.align_ratio = max(0.1, min(1.0, values["align_size_percent"] / 100.0))
                 continue
 
             if key == ord("q"):
@@ -1654,6 +1811,7 @@ def run_raw_live_stack(args):
                         size_label="N/A",
                         stop_ratio_percent=int(live_stack.overflow_ratio_threshold * 100),
                         stop_threshold=live_stack.brightness_threshold,
+                        align_size_percent=int(round(live_stack.align_ratio * 100)),
                     )
                     print("設定メニューを開きました")
                 else:
@@ -1842,12 +2000,14 @@ def run_raw_live_stack(args):
             elif key == ord("D"):
                 live_stack.dark_frame = None
                 live_stack.dark_buffer = []
+                live_stack.build_hot_mask()
                 print("[dark] ダークフレームクリア")
             elif key == ord("C"):
                 config_path = args.config if args.config else "config.json"
                 # メニューで変更された可能性がある値をargsに反映してから保存
                 args.stop_threshold = live_stack.brightness_threshold
                 args.stop_ratio = round(live_stack.overflow_ratio_threshold * 100.0, 1)
+                args.align_size = int(round(live_stack.align_ratio * 100))
                 args.wb_b = round(float(wb_gains[0]), 3)
                 args.wb_g = round(float(wb_gains[1]), 3)
                 args.wb_r = round(float(wb_gains[2]), 3)
@@ -1941,10 +2101,14 @@ def build_arg_parser():
     parser.add_argument("--flip-v", action="store_true", help="上下反転して起動")
     parser.add_argument("--dark-file", type=str, default="dark.fits",
                         help="ダークフレームの保存/読み込みパス (デフォルト: dark.fits)")
+    parser.add_argument("--hot-sigma", type=float, default=10.0,
+                        help="ダークからのホットピクセル判定しきい値 (σ倍、0=無効、デフォルト: 10)")
     parser.add_argument("--stop-threshold", type=int, default=None,
                         help="スタック打ち切り輝度しきい値 (ネイティブbit深度単位、未指定=bit深度の最大値)")
     parser.add_argument("--stop-ratio", type=float, default=None,
                         help="スタック打ち切り比率%% (1−50、未指定=10.0)")
+    parser.add_argument("--align-size", type=int, default=50,
+                        help="位置合わせ検出窓の大きさ 画像幅/高さに対する%% (10−100、デフォルト: 50)")
     parser.add_argument("--wb-b", type=float, default=None, help="初期WBゲイン B (デフォルト: 1.0)")
     parser.add_argument("--wb-g", type=float, default=None, help="初期WBゲイン G (デフォルト: 1.0)")
     parser.add_argument("--wb-r", type=float, default=None, help="初期WBゲイン R (デフォルト: 1.0)")
