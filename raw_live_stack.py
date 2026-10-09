@@ -131,6 +131,13 @@ def compute_white_ratio_native(frame_native, threshold_native):
     return float(white_pixels) / float(total_pixels)
 
 
+def _now_local_utc_iso():
+    """(ローカル時刻 ISO8601 オフセット付き, UTC 時刻 ISO8601 'Z' 付き) を返す。"""
+    loc = datetime.datetime.now().astimezone()
+    utc = loc.astimezone(datetime.timezone.utc)
+    return loc.isoformat(timespec="seconds"), utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _make_exif_bytes(frame_count, effective_bits, bayer_name, wb_gains, gamma_value,
                      stack_count, stack_enabled, source, flip_h, flip_v, wire_format, w, h,
                      shutter_us=None, gain=None,
@@ -138,7 +145,10 @@ def _make_exif_bytes(frame_count, effective_bits, bayer_name, wb_gains, gamma_va
                      object_name=None, observer=None, instrument=None):
     """JPEG用EXIFバイト列を生成する。"""
     now_str = datetime.datetime.now().strftime("%Y:%m:%d %H:%M:%S")
+    _loc_iso, _utc_iso = _now_local_utc_iso()
     fields = [
+        f"datetime_local={_loc_iso}",
+        f"datetime_utc={_utc_iso}",
         f"bits={effective_bits}",
         f"bayer={bayer_name}",
         f"wb_b={wb_gains[0]:.3f}",
@@ -999,6 +1009,7 @@ def save_ser(frames, filename, bayer_key, bits, width, height, lsb=False):
     # タイムスタンプ: .NET DateTime.Ticks (100ns 単位, 0001-01-01 起点)
     now_utc = datetime.datetime.utcnow()
     ticks = int((now_utc - datetime.datetime(1, 1, 1)).total_seconds() * 10_000_000)
+    ticks_local = ticks + int(datetime.datetime.now().astimezone().utcoffset().total_seconds() * 10_000_000)
 
     # SER ヘッダー (178 bytes 固定)
     header = (
@@ -1013,7 +1024,7 @@ def save_ser(frames, filename, bayer_key, bits, width, height, lsb=False):
         + b"LiveStack".ljust(40, b"\x00")[:40]   # 40 bytes: Observer
         + b"rpicam-raw".ljust(40, b"\x00")[:40]  # 40 bytes: Instrument
         + b"".ljust(40, b"\x00")     # 40 bytes: Telescope
-        + struct.pack("<q", ticks)   #  8 bytes: DateTime (local)
+        + struct.pack("<q", ticks_local)   #  8 bytes: DateTime (local)
         + struct.pack("<q", ticks)   #  8 bytes: DateTimeUTC
     )
     assert len(header) == 178, f"SER header size mismatch: {len(header)}"
@@ -1824,12 +1835,15 @@ def run_raw_live_stack(args):
                         break
                 print(f"情報表示: {'ON' if info_display else 'OFF'}")
             elif key == ord("s") and display_frame is not None:
-                fname = f"raw_live_stack_frame{frame_count}.png"
+                fname = f"{datetime.datetime.now():%Y%m%d_%H%M%S}.png"
                 wb_full = apply_white_balance(display_frame, wb_gains)
                 png_frame = apply_gamma_correction(wb_full, gamma_value)
                 h_s, w_s = png_frame.shape[:2]
                 png_info = PngImagePlugin.PngInfo()
+                _loc_iso, _utc_iso = _now_local_utc_iso()
                 png_info.add_text("DateTime", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                png_info.add_text("DateTimeLocal", _loc_iso)
+                png_info.add_text("DateTimeUTC", _utc_iso)
                 png_info.add_text("Source", args.source)
                 png_info.add_text("Bits", str(effective_bits))
                 png_info.add_text("Bayer", bayer_keys[bayer_idx])
@@ -1854,7 +1868,7 @@ def run_raw_live_stack(args):
                 pil_img.save(fname, "PNG", pnginfo=png_info)
                 print(f"[save] PNG: {fname}  (WB/Gamma適用後, フルサイズ, tEXt付き)")
             elif key == ord("j") and save_frame is not None:
-                fname = f"raw_live_stack_frame{frame_count}.jpg"
+                fname = f"{datetime.datetime.now():%Y%m%d_%H%M%S}.jpg"
                 wb_full = apply_white_balance(save_frame, wb_gains)
                 jpg_frame = apply_gamma_correction(wb_full, gamma_value)
                 h_j, w_j = jpg_frame.shape[:2]
@@ -1886,6 +1900,7 @@ def run_raw_live_stack(args):
                     w_r = last_raw16.shape[1] if last_raw16 is not None else args.width
                     now_utc = datetime.datetime.utcnow()
                     ticks = int((now_utc - datetime.datetime(1, 1, 1)).total_seconds() * 10_000_000)
+                    ticks_local = ticks + int(datetime.datetime.now().astimezone().utcoffset().total_seconds() * 10_000_000)
                     header = (
                         b"LUCAM-RECORDER"
                         + struct.pack("<I", 0)
@@ -1898,10 +1913,10 @@ def run_raw_live_stack(args):
                         + (getattr(args, "observer", None) or f"WB B:{wb_gains[0]:.2f} G:{wb_gains[1]:.2f} R:{wb_gains[2]:.2f} g:{gamma_value:.2f}").encode()[:40].ljust(40, b"\x00")
                         + (getattr(args, "instrument", None) or f"rpicam-raw {args.wire_format or ''}").encode()[:40].ljust(40, b"\x00")
                         + (getattr(args, "telescope", None) or f"stk={live_stack.stack_count} {effective_bits}bit {bayer_keys[bayer_idx]}").encode()[:40].ljust(40, b"\x00")
-                        + struct.pack("<q", ticks)
+                        + struct.pack("<q", ticks_local)
                         + struct.pack("<q", ticks)
                     )
-                    _ser_fname = f"raw_live_stack_frame{frame_count}.ser"
+                    _ser_fname = f"{datetime.datetime.now():%Y%m%d_%H%M%S}.ser"
                     _ser_file = open(_ser_fname, "wb")
                     _ser_file.write(header)
                     _ser_frame_count = 0
@@ -1921,14 +1936,18 @@ def run_raw_live_stack(args):
                     _ser_timestamps.clear()
                     print(f"[SER] 録画停止: {_ser_fname}  {_ser_frame_count}フレーム")
             elif key == ord("r") and last_raw16 is not None:
-                fname = f"raw_live_stack_frame{frame_count}_raw16.npy"
+                fname = f"{datetime.datetime.now():%Y%m%d_%H%M%S}.npy"
                 np.save(fname, last_raw16)
                 print(f"[save] NPY: {fname}  dtype={last_raw16.dtype}  shape={last_raw16.shape}")
             elif key == ord("f") and save_frame is not None:
+                _loc_iso, _utc_iso = _now_local_utc_iso()
                 metadata = {
                     "STACKCNT": live_stack.stack_count,
                     "MODE": "LiveStack" if stack_enabled else "LiveView",
                     "DATE": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "DATE-OBS": _utc_iso.rstrip("Z"),
+                    "TIMESYS": "UTC",
+                    "DATE-LOC": _loc_iso,
                     "BITPIX": effective_bits,
                     "BAYER": bayer_keys[bayer_idx],
                     "WB_B": round(float(wb_gains[0]), 4),
@@ -1948,7 +1967,7 @@ def run_raw_live_stack(args):
                     _v = getattr(args, _attr, None)
                     if _v:
                         metadata[_fits_key] = _v
-                fname = f"raw_live_stack_frame{frame_count}.fits"
+                fname = f"{datetime.datetime.now():%Y%m%d_%H%M%S}.fits"
                 if stack_enabled and live_stack.stacked_raw16 is not None:
                     # 累積スタックをuint16 BGRにデベイヤしてフリップを適用
                     stk_u16 = np.clip(live_stack.stacked_raw16, 0, 65535).astype(np.uint16)

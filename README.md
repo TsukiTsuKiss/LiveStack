@@ -140,7 +140,8 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - `j`: JPEG保存（WB/ガンマ適用後、フルサイズ、EXIF付き）
 - `f`: FITS保存（uint16、スタック平均値）
 - `r`: NPY保存（16bit RAW）
-- `h`: 左右反転 ON/OFF
+
+保存ファイル名は `yyyymmdd_HHMMSS.拡張子`（ローカル時刻。SERは録画開始時刻）。UTCはファイル内に記録される（FITS: `DATE-OBS`、PNG: `DateTimeUTC`、JPEG: EXIF UserComment、SER: ヘッダー`DateTimeUTC`とトレーラー）。NPYには日時情報なし。- `h`: 左右反転 ON/OFF
 - `v`: 上下反転 ON/OFF
 - `H`: ヒストグラム+CCDF ON/OFF
 - `a`: 自動ストレッチ ON/OFF
