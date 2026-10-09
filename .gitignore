@@ -3,10 +3,12 @@
 *.jpeg
 *.png
 *.fits
+*.gif
 
 # 動画ファイル
 *.ser
 *.mp4
+*.avi
 
 # キャッシュファイル
 __pycache__/
