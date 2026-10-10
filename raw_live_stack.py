@@ -22,6 +22,7 @@ rpicam-raw TCP生ストリーム専用ライブスタック
     [n] 次のフォーマット候補に切替
     [+/-] skip ±1行
     [a] 自動ストレッチ ON/OFF
+    [A] 位置合わせ ON/OFF
     [b] Bayerパターン切替
     [h] 左右反転 ON/OFF
     [v] 上下反転 ON/OFF
@@ -226,6 +227,7 @@ class LiveStack:
         self.align_max_jump = 10.0  # 予測位置からこれ以上外れた検出は異常値(raw px)
         self._hann = {}
         self.align_ratio = 0.5  # ずれ検出窓の大きさ（画像幅/高さに対する比率）
+        self.align_enabled = True  # False: ずれ検出も移動もせず単純加算
         self.align_min_response = 0.05  # phaseCorrelateの応答がこれ未満なら検出失敗
         self.last_align_ms = 0.0  # 直近のずれ検出にかかった時間
         self.buffer_index = 0
@@ -395,6 +397,13 @@ class LiveStack:
     def add_to_buffer(self, frame, frame_id=None):
         """リングバッファにフレームを追加"""
         t0 = time.perf_counter()
+        if not self.align_enabled:
+            self.buffer[self.buffer_index] = frame
+            self.buffer_frame_ids[self.buffer_index] = frame_id
+            self.buffer_pos[self.buffer_index] = (0.0, 0.0)
+            self.buffer_index = (self.buffer_index + 1) % self.max_frames
+            self.last_align_ms = 0.0
+            return
         cur = self._prepare_align_image(frame)
         pos = self._last_pos
         if self._ref_img is not None and self._ref_img.shape == cur.shape:
@@ -574,7 +583,7 @@ class LiveStack:
             cum_x = latest_pos[0] - past_pos[0]
             cum_y = latest_pos[1] - past_pos[1]
             # Bayer色ごとの面を別々にサブピクセルでずらす（色配列を壊さない）
-            aligned = self._warp_bayer(past_f32, cum_x, cum_y)
+            aligned = self._warp_bayer(past_f32, cum_x, cum_y) if self.align_enabled else past_f32
 
             test_stack = stacked + aligned
 
@@ -750,6 +759,10 @@ class SettingsMenu:
                 "min": 10,
                 "max": 100,
                 "step": 10
+            },
+            {
+                "name": "Align",
+                "value": True
             }
         ]
         self.selected_item = 0
@@ -848,7 +861,7 @@ class SettingsMenu:
         elif setting["name"] == "Stack Mode":
             setting["value"] = not setting["value"]
 
-        elif setting["name"] == "Info Display":
+        elif setting["name"] in ("Info Display", "Align"):
             setting["value"] = not setting["value"]
 
         elif setting["name"] == "Stop Ratio(%)":
@@ -910,7 +923,7 @@ class SettingsMenu:
                 value_text = setting["value"]
             elif setting["name"] == "Stack Mode":
                 value_text = "ON" if setting["value"] else "OFF"
-            elif setting["name"] == "Info Display":
+            elif setting["name"] in ("Info Display", "Align"):
                 value_text = "ON" if setting["value"] else "OFF"
             elif setting["name"] == "Stop Ratio(%)":
                 value_text = f"{int(setting['value'])}%"
@@ -948,9 +961,10 @@ class SettingsMenu:
             "stop_threshold": int(values_by_name.get("Stop Threshold", 255)),
             "stop_ratio_percent": int(values_by_name.get("Stop Ratio(%)", 10)),
             "align_size_percent": int(values_by_name.get("Align Size(%)", 50)),
+            "align_enabled": bool(values_by_name.get("Align", True)),
         }
 
-    def set_current_values(self, camera, gain, exposure, max_frames, stack_mode, info_display=True, size_label="N/A", stop_ratio_percent=10, stop_threshold=255, align_size_percent=50):
+    def set_current_values(self, camera, gain, exposure, max_frames, stack_mode, info_display=True, size_label="N/A", stop_ratio_percent=10, stop_threshold=255, align_size_percent=50, align_enabled=True):
         """現在の設定値を更新"""
         values = {
             "Camera": camera,
@@ -963,6 +977,7 @@ class SettingsMenu:
             "Stop Threshold": int(stop_threshold),
             "Stop Ratio(%)": int(stop_ratio_percent),
             "Align Size(%)": int(align_size_percent),
+            "Align": bool(align_enabled),
         }
 
         for setting in self.settings:
@@ -1288,9 +1303,10 @@ def run_raw_live_stack(args):
         if args.stop_ratio is not None:
             live_stack.overflow_ratio_threshold = max(0.01, min(0.50, args.stop_ratio / 100.0))
         live_stack.align_ratio = max(0.1, min(1.0, args.align_size / 100.0))
+        live_stack.align_enabled = not args.no_align
 
         settings_menu = SettingsMenu()
-        stream_menu_names = {"Max Frames", "Stack Mode", "Info Display", "Stop Threshold", "Stop Ratio(%)", "Align Size(%)"}        
+        stream_menu_names = {"Max Frames", "Stack Mode", "Info Display", "Stop Threshold", "Stop Ratio(%)", "Align Size(%)", "Align"}
         # Stop Threshold の範囲をビット深度に合わせて更新
         max_val = (1 << effective_bits) - 1
         for _s in settings_menu.settings:
@@ -1316,6 +1332,7 @@ def run_raw_live_stack(args):
             stop_ratio_percent=int(live_stack.overflow_ratio_threshold * 100),
             stop_threshold=live_stack.brightness_threshold,
             align_size_percent=int(round(live_stack.align_ratio * 100)),
+            align_enabled=live_stack.align_enabled,
         )
 
         screen_size = get_screen_size()
@@ -1406,7 +1423,7 @@ def run_raw_live_stack(args):
         cv2.setMouseCallback(PREVIEW_WINDOW_NAME, on_mouse)
 
         print("\n操作: [q]終了  [m]設定メニュー  [i]情報表示  [s]PNG保存  [r]NPY保存  [f]FITS保存")
-        print("       [n]次候補フォーマット  [+/-]skip±1行  [a]ストレッチ切替  [b]Bayer切替")
+        print("       [n]次候補フォーマット  [+/-]skip±1行  [a]ストレッチ切替  [A]位置合わせ切替  [b]Bayer切替")
         print("       [o]停止判定モード切替（超過フレームを含む/含まない）")
         print("       [h]左右反転  [v]上下反転  [H]ヒストグラム切替  [t]LiveStack ON/OFF  [R]LiveStackリセット")
         print("       [w]白点クリックWB  [W]WBリセット  [g]ガンマ調整モード  [G]ガンマリセット")
@@ -1794,6 +1811,10 @@ def run_raw_live_stack(args):
                     live_stack.overflow_ratio_threshold = max(0.01, min(0.50, values["stop_ratio_percent"] / 100.0))
                     live_stack.brightness_threshold = max(1, min((1 << live_stack.bits) - 1, values["stop_threshold"]))
                     live_stack.align_ratio = max(0.1, min(1.0, values["align_size_percent"] / 100.0))
+                    if values["align_enabled"] != live_stack.align_enabled:
+                        live_stack.align_enabled = values["align_enabled"]
+                        do_stack_reset()
+                        print(f"[align] {'ON' if live_stack.align_enabled else 'OFF'}")
                 continue
 
             if key == ord("q"):
@@ -1844,6 +1865,7 @@ def run_raw_live_stack(args):
                         stop_ratio_percent=int(live_stack.overflow_ratio_threshold * 100),
                         stop_threshold=live_stack.brightness_threshold,
                         align_size_percent=int(round(live_stack.align_ratio * 100)),
+                        align_enabled=live_stack.align_enabled,
                     )
                     print("設定メニューを開きました")
                 else:
@@ -2009,6 +2031,14 @@ def run_raw_live_stack(args):
             elif key == ord("a"):
                 auto_stretch = not auto_stretch
                 print(f"[stretch] {'ON' if auto_stretch else 'OFF'}")
+            elif key == ord("A"):
+                live_stack.align_enabled = not live_stack.align_enabled
+                for s in settings_menu.settings:
+                    if s["name"] == "Align":
+                        s["value"] = live_stack.align_enabled
+                        break
+                do_stack_reset()  # 位置が混在しないようバッファを捨てる
+                print(f"[align] {'ON' if live_stack.align_enabled else 'OFF'}")
             elif key == ord("h"):
                 flip_h = not flip_h
                 print(f"左右反転: {'ON' if flip_h else 'OFF'}")
@@ -2051,6 +2081,7 @@ def run_raw_live_stack(args):
                 args.stop_threshold = live_stack.brightness_threshold
                 args.stop_ratio = round(live_stack.overflow_ratio_threshold * 100.0, 1)
                 args.align_size = int(round(live_stack.align_ratio * 100))
+                args.no_align = not live_stack.align_enabled
                 args.wb_b = round(float(wb_gains[0]), 3)
                 args.wb_g = round(float(wb_gains[1]), 3)
                 args.wb_r = round(float(wb_gains[2]), 3)
@@ -2153,6 +2184,7 @@ def build_arg_parser():
                         help="スタック打ち切り比率%% (1−50、未指定=10.0)")
     parser.add_argument("--align-size", type=int, default=50,
                         help="位置合わせ検出窓の大きさ 画像幅/高さに対する%% (10−100、デフォルト: 50)")
+    parser.add_argument("--no-align", action="store_true", help="位置合わせを無効化して単純加算 ([A]キー/メニューで切替可)")
     parser.add_argument("--wb-b", type=float, default=None, help="初期WBゲイン B (デフォルト: 1.0)")
     parser.add_argument("--wb-g", type=float, default=None, help="初期WBゲイン G (デフォルト: 1.0)")
     parser.add_argument("--wb-r", type=float, default=None, help="初期WBゲイン R (デフォルト: 1.0)")
