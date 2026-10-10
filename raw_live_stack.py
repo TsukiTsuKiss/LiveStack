@@ -994,6 +994,18 @@ class SettingsMenu:
 # 保存ユーティリティ
 # ---------------------------------------------------------------------------
 
+def flip_bayer_key(bayer_key, flip_h, flip_v, width, height):
+    """反転後のBayerパターン名を返す（偶数サイズのときのみパターンが入れ替わる）"""
+    if len(bayer_key) != 4:
+        return bayer_key
+    top, bottom = bayer_key[0:2], bayer_key[2:4]
+    if flip_h and width % 2 == 0:
+        top, bottom = top[::-1], bottom[::-1]
+    if flip_v and height % 2 == 0:
+        top, bottom = bottom, top
+    return top + bottom
+
+
 def save_ser(frames, filename, bayer_key, bits, width, height, lsb=False):
     """SER形式でraw16 Bayerフレームを保存（天体撮影用マルチフレームフォーマット）
 
@@ -1421,6 +1433,8 @@ def run_raw_live_stack(args):
         _ser_frame_count = 0
         _ser_fname = ""
         _ser_timestamps = []   # フレームごとの受信時刻 Ticks（トレーラー用）
+        _ser_flip_h = False    # 録画開始時点のフリップ状態を固定
+        _ser_flip_v = False
         # 画面上に一時表示する通知メッセージ: [(text, expire_time), ...]
         _hud_msgs = []
         if live_stack.dark_frame is not None:
@@ -1523,7 +1537,14 @@ def run_raw_live_stack(args):
                 else:
                     ser_f32 = None
                 if ser_f32 is not None:
-                    _ser_file.write((ser_f32 * (1 << shift)).clip(0, 65535).astype(np.uint16).tobytes())
+                    ser_u16 = (ser_f32 * (1 << shift)).clip(0, 65535).astype(np.uint16)
+                    if _ser_flip_h and _ser_flip_v:
+                        ser_u16 = cv2.flip(ser_u16, -1)
+                    elif _ser_flip_h:
+                        ser_u16 = cv2.flip(ser_u16, 1)
+                    elif _ser_flip_v:
+                        ser_u16 = cv2.flip(ser_u16, 0)
+                    _ser_file.write(ser_u16.tobytes())
                 # 受信時刻を .NET DateTime.Ticks (100ns単位) で記録
                 now_utc = datetime.datetime.utcnow()
                 ticks = int((now_utc - datetime.datetime(1, 1, 1)).total_seconds() * 10_000_000)
@@ -1895,9 +1916,12 @@ def run_raw_live_stack(args):
                     import struct
                     # ColorID=BayerパターンID: SER Player互換（RGGB↔BGGR, GRBG↔GBRG を反転）
                     color_id_map = {"RGGB": 11, "GRBG": 10, "GBRG": 9, "BGGR": 8}
-                    color_id = color_id_map.get(bayer_keys[bayer_idx], 0)
                     h_r = last_raw16.shape[0] if last_raw16 is not None else args.height
                     w_r = last_raw16.shape[1] if last_raw16 is not None else args.width
+                    _ser_flip_h = bool(args.ser_flip and flip_h)
+                    _ser_flip_v = bool(args.ser_flip and flip_v)
+                    ser_bayer_key = flip_bayer_key(bayer_keys[bayer_idx], _ser_flip_h, _ser_flip_v, w_r, h_r)
+                    color_id = color_id_map.get(ser_bayer_key, 0)
                     now_utc = datetime.datetime.utcnow()
                     ticks = int((now_utc - datetime.datetime(1, 1, 1)).total_seconds() * 10_000_000)
                     ticks_local = ticks + int(datetime.datetime.now().astimezone().utcoffset().total_seconds() * 10_000_000)
@@ -1912,7 +1936,7 @@ def run_raw_live_stack(args):
                         + struct.pack("<I", 0)   # フレーム数: 停止時にパッチ
                         + (getattr(args, "observer", None) or f"WB B:{wb_gains[0]:.2f} G:{wb_gains[1]:.2f} R:{wb_gains[2]:.2f} g:{gamma_value:.2f}").encode()[:40].ljust(40, b"\x00")
                         + (getattr(args, "instrument", None) or f"rpicam-raw {args.wire_format or ''}").encode()[:40].ljust(40, b"\x00")
-                        + (getattr(args, "telescope", None) or f"stk={live_stack.stack_count} {effective_bits}bit {bayer_keys[bayer_idx]}").encode()[:40].ljust(40, b"\x00")
+                        + (getattr(args, "telescope", None) or f"stk={live_stack.stack_count} {effective_bits}bit {ser_bayer_key}").encode()[:40].ljust(40, b"\x00")
                         + struct.pack("<q", ticks_local)
                         + struct.pack("<q", ticks)
                     )
@@ -1922,7 +1946,7 @@ def run_raw_live_stack(args):
                     _ser_frame_count = 0
                     _ser_timestamps.clear()
                     _ser_recording = True
-                    print(f"[SER] 録画開始: {_ser_fname}  {w_r}x{h_r} effective={effective_bits}bit (container={fmt['bits']}bit) {bayer_keys[bayer_idx]} (ColorID={color_id})")
+                    print(f"[SER] 録画開始: {_ser_fname}  {w_r}x{h_r} effective={effective_bits}bit (container={fmt['bits']}bit) {ser_bayer_key} (ColorID={color_id}) flip_h={_ser_flip_h} flip_v={_ser_flip_v}")
                 else:
                     # --- 録画停止: トレーラー書き込み + フレーム数パッチ ---
                     import struct
@@ -2116,6 +2140,7 @@ def build_arg_parser():
     parser.add_argument("--no-stretch", action="store_true", help="自動ストレッチを無効化 (デフォルト: ストレッチ有効)")
     parser.add_argument("--max-frames", type=int, default=100, help="LiveStack最大フレーム数 (デフォルト: 100)")
     parser.add_argument("--ser-lsb", action="store_true", help="SER書き出しを下位詰め(LSB-aligned)にする (デフォルト: 上位詰めMSB-aligned)")
+    parser.add_argument("--ser-flip", action="store_true", help="SER録画にも上下左右反転を反映する (録画開始時の状態で固定、ColorIDも反転後のBayerに更新)")
     parser.add_argument("--flip-h", action="store_true", help="左右反転して起動")
     parser.add_argument("--flip-v", action="store_true", help="上下反転して起動")
     parser.add_argument("--dark-file", type=str, default="dark.fits",

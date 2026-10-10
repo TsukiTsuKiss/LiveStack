@@ -158,6 +158,9 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - `S`: SER録画開始/停止トグル
 - `z`: フォーカスアシストズーム ON/OFF（ON中にクリック/ドラッグで拡大エリアを選択）
 
+**SER反転オプション:**
+- `--ser-flip`: SER録画にも `--flip-h`/`--flip-v`（`[h]`/`[v]`）の状態を反映（録画開始時に固定、ColorIDも更新）。既定ではSERは生Bayerのまま反転しない。理由は `仕様.md` の「SER録画機能」を参照
+
 **SSH連携オプション（CLIまたはJSONで指定）:**
 - `--ssh-host <IP>`: Pi側ホスト。指定時に起動・終了を自動制御
 - `--ssh-user <user>`: SSHユーザー名（デフォルト: `pi`）
