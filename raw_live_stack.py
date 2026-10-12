@@ -24,6 +24,10 @@ rpicam-raw TCP生ストリーム専用ライブスタック
     [a] 自動ストレッチ ON/OFF
     [A] 位置合わせ ON/OFF
     [E] ダーク減算 ON/OFF
+    [space] SER入力: 一時停止/再生
+    [,]/[.] SER入力: 1コマ戻る/進む
+    [[]/[]] SER入力: 先頭/末尾へジャンプ (Home/Endも可)
+    [l] SER入力: ループ ON/OFF
     [b] Bayerパターン切替
     [h] 左右反転 ON/OFF
     [v] 上下反転 ON/OFF
@@ -1064,6 +1068,11 @@ class SerReader:
         """直近に返したフレームの番号(1始まり)。"""
         return self._idx
 
+    def read_at(self, index):
+        """index(0始まり、範囲外は循環)のフレームを返す。"""
+        self._idx = index % self.frame_count
+        return self.next_frame()
+
     def next_frame(self):
         """次のフレームのバイト列を返す。最後まで読んだら先頭に戻る。"""
         if self._idx >= self.frame_count:
@@ -1528,6 +1537,8 @@ def run_raw_live_stack(args):
         print("       [w]白点クリックWB  [W]WBリセット  [g]ガンマ調整モード  [G]ガンマリセット")
         print("       [d]ダークフレーム取得（レンズキャップして押す）  [D]ダーククリア")
         print("       [S]SER録画開始/停止トグル")
+        if ser_reader is not None:
+            print("       [space]一時停止/再生  [,][.]コマ戻し/送り  [[][]]先頭/末尾へ  [l]ループ切替")
 
         frame_count = 0
         last_raw16 = None
@@ -1558,6 +1569,13 @@ def run_raw_live_stack(args):
         frame_bytes = first_frame_bytes
         _ser_interval = 1.0 / max(args.ser_fps, 0.01)
         _ser_next_t = time.perf_counter()
+        ser_paused = False
+        ser_loop = True
+        _frame_fresh = True  # False: 同じフレームの再表示(一時停止中)
+
+        def _save_stem():
+            stem = f"{datetime.datetime.now():%Y%m%d_%H%M%S}"
+            return f"{stem}_f{ser_reader.position:04d}" if ser_reader is not None else stem
 
         # --- バックグラウンドスタックスレッド ---
         _stack_event = threading.Event()   # 新フレーム追加を通知
@@ -1629,12 +1647,13 @@ def run_raw_live_stack(args):
                     s_lo, s_hi = 0.0, float((1 << effective_bits) - 1)
 
                 last_raw16 = raw16
-                frame_count += 1
-                now_t = time.perf_counter()
-                dt = now_t - prev_frame_t
-                prev_frame_t = now_t
-                if dt > 0.0:
-                    perf_input_fps[0] = ema(perf_input_fps[0], 1.0 / dt)
+                if _frame_fresh:
+                    frame_count += 1
+                    now_t = time.perf_counter()
+                    dt = now_t - prev_frame_t
+                    prev_frame_t = now_t
+                    if dt > 0.0:
+                        perf_input_fps[0] = ema(perf_input_fps[0], 1.0 / dt)
             except Exception as e:
                 print(f"[decode error] {e}")
                 bgr = bgr_disp = np.zeros((args.height // 4, args.width // 4, 3), dtype=np.uint8)
@@ -1642,11 +1661,12 @@ def run_raw_live_stack(args):
 
             # --- LiveStack ---
             # raw16 Bayerをそのままバッファへ（12bit情報を消さずに保持）
-            live_stack.add_to_buffer(raw16, frame_count)
+            if _frame_fresh:
+                live_stack.add_to_buffer(raw16, frame_count)
 
             # --- SER リアルタイム追記 ---
             # スタックON: スタック加算値を書き込む / スタックOFF: 最新1フレームを書き込む
-            if _ser_recording and _ser_file is not None:
+            if _ser_recording and _ser_file is not None and _frame_fresh:
                 shift = 0 if args.ser_lsb else (16 - effective_bits)  # LSB詰め or MSB詰め(上位詰め)
                 if stack_enabled and live_stack.stacked_raw16 is not None:
                     ser_f32 = live_stack.stacked_raw16.astype(np.float32)
@@ -1668,6 +1688,8 @@ def run_raw_live_stack(args):
                 ticks = int((now_utc - datetime.datetime(1, 1, 1)).total_seconds() * 10_000_000)
                 _ser_timestamps.append(ticks)
                 _ser_frame_count += 1
+
+            _frame_fresh = False
 
             if stack_enabled:
                 _stack_event.set()           # バックグラウンドスタックを起動
@@ -1723,7 +1745,7 @@ def run_raw_live_stack(args):
                 lines = [
                     f"{args.source}",
                     f"{src_w}x{src_h}  frame#{frame_count}"
-                    + (f"  SER {ser_reader.position}/{ser_reader.frame_count}" if ser_reader is not None else ""),
+                    + (f"  SER {ser_reader.position}/{ser_reader.frame_count}{'  PAUSE' if ser_paused else ''}{'' if ser_loop else '  no-loop'}" if ser_reader is not None else ""),
                     f"{fmt['name'].strip()} | Bayer:{bayer_name} | {stretch_label} | Stack:{'ON' if stack_enabled else 'OFF'}",
                 ]
                 if args.wire_format in ("12u", "10u", "16u"):
@@ -1990,7 +2012,7 @@ def run_raw_live_stack(args):
                         break
                 print(f"情報表示: {'ON' if info_display else 'OFF'}")
             elif key == ord("s") and display_frame is not None:
-                fname = f"{datetime.datetime.now():%Y%m%d_%H%M%S}.png"
+                fname = f"{_save_stem()}.png"
                 wb_full = apply_white_balance(display_frame, wb_gains)
                 png_frame = apply_gamma_correction(wb_full, gamma_value)
                 h_s, w_s = png_frame.shape[:2]
@@ -2023,7 +2045,7 @@ def run_raw_live_stack(args):
                 pil_img.save(fname, "PNG", pnginfo=png_info)
                 print(f"[save] PNG: {fname}  (WB/Gamma適用後, フルサイズ, tEXt付き)")
             elif key == ord("j") and save_frame is not None:
-                fname = f"{datetime.datetime.now():%Y%m%d_%H%M%S}.jpg"
+                fname = f"{_save_stem()}.jpg"
                 wb_full = apply_white_balance(save_frame, wb_gains)
                 jpg_frame = apply_gamma_correction(wb_full, gamma_value)
                 h_j, w_j = jpg_frame.shape[:2]
@@ -2094,7 +2116,7 @@ def run_raw_live_stack(args):
                     _ser_timestamps.clear()
                     print(f"[SER] 録画停止: {_ser_fname}  {_ser_frame_count}フレーム")
             elif key == ord("r") and last_raw16 is not None:
-                fname = f"{datetime.datetime.now():%Y%m%d_%H%M%S}.npy"
+                fname = f"{_save_stem()}.npy"
                 np.save(fname, last_raw16)
                 print(f"[save] NPY: {fname}  dtype={last_raw16.dtype}  shape={last_raw16.shape}")
             elif key == ord("f") and save_frame is not None:
@@ -2125,7 +2147,7 @@ def run_raw_live_stack(args):
                     _v = getattr(args, _attr, None)
                     if _v:
                         metadata[_fits_key] = _v
-                fname = f"{datetime.datetime.now():%Y%m%d_%H%M%S}.fits"
+                fname = f"{_save_stem()}.fits"
                 if stack_enabled and live_stack.stacked_raw16 is not None:
                     # 累積スタックをuint16 BGRにデベイヤしてフリップを適用
                     stk_u16 = np.clip(live_stack.stacked_raw16, 0, 65535).astype(np.uint16)
@@ -2230,10 +2252,44 @@ def run_raw_live_stack(args):
                 do_stack_reset()
                 print(f"[skip] -{fmt['stride']} -> skip={skip}")
                 buf.clear()
+            elif ser_reader is not None and key == ord(" "):
+                ser_paused = not ser_paused
+                if not ser_paused and not ser_loop and ser_reader.position >= ser_reader.frame_count:
+                    frame_bytes = ser_reader.read_at(0)
+                    do_stack_reset()
+                    _frame_fresh = True
+                print(f"[SER] {'一時停止' if ser_paused else '再生'}")
+            elif ser_reader is not None and key in (ord("."), ord(",")):
+                ser_paused = True
+                if key == ord("."):
+                    if ser_reader.position >= ser_reader.frame_count:
+                        do_stack_reset()  # 末尾→先頭の連続しないフレーム
+                    frame_bytes = ser_reader.next_frame()
+                else:
+                    frame_bytes = ser_reader.read_at(ser_reader.position - 2)
+                    do_stack_reset()
+                _frame_fresh = True
+            elif ser_reader is not None and (key in (ord("["), ord("]")) or key_raw in (2359296, 2293760)):  # Home/End
+                ser_paused = True
+                to_first = key == ord("[") or key_raw == 2359296
+                frame_bytes = ser_reader.read_at(0 if to_first else ser_reader.frame_count - 1)
+                do_stack_reset()
+                _frame_fresh = True
+            elif ser_reader is not None and key == ord("l"):
+                ser_loop = not ser_loop
+                print(f"[SER] ループ: {'ON' if ser_loop else 'OFF'}")
 
             # --- 次フレーム受信 ---
             if ser_reader is not None:
-                frame_bytes = ser_reader.next_frame()
+                if not ser_paused and ser_reader.position >= ser_reader.frame_count:
+                    if ser_loop:
+                        do_stack_reset()  # 先頭に戻ると時系列が途切れる
+                    else:
+                        ser_paused = True
+                        print("[SER] 末尾で停止 ([l]ループ切替, [space]で先頭から再生)")
+                if not ser_paused:
+                    frame_bytes = ser_reader.next_frame()
+                    _frame_fresh = True
                 continue
             total_size = skip + fmt["frame_size"]
             sock.settimeout(args.timeout)
