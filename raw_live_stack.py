@@ -23,6 +23,7 @@ rpicam-raw TCP生ストリーム専用ライブスタック
     [+/-] skip ±1行
     [a] 自動ストレッチ ON/OFF
     [A] 位置合わせ ON/OFF
+    [E] ダーク減算 ON/OFF
     [b] Bayerパターン切替
     [h] 左右反転 ON/OFF
     [v] 上下反転 ON/OFF
@@ -232,6 +233,7 @@ class LiveStack:
         self.last_align_ms = 0.0  # 直近のずれ検出にかかった時間
         self.buffer_index = 0
         self.dark_frame = None  # d キーで取得するまでは None（サイズを動的に合わせるため）
+        self.dark_enabled = True  # False: ダークがあっても減算・ホットピクセル補間をしない
         self.dark_buffer = []  # ダークフレーム用リングバッファ
         self.hot_sigma = 10.0  # ホットピクセル判定のしきい値(σ倍)。0以下で無効
         self._hot_fix = None  # (idx, nb_idx(4,n), nb_valid(4,n)) ホットピクセル補間用の索引
@@ -459,9 +461,9 @@ class LiveStack:
         y0 = (h - sh) // 2 // 2 * 2
         x0 = (w - sw) // 2 // 2 * 2
         crop = raw16[y0:y0 + sh, x0:x0 + sw].astype(np.float32)
-        if self.dark_frame is not None:
+        if self.dark_frame is not None and self.dark_enabled:
             crop -= self.dark_frame[y0:y0 + sh, x0:x0 + sw]
-        if self._hot_mask is not None and self._hot_mask.shape == raw16.shape[:2]:
+        if self.dark_enabled and self._hot_mask is not None and self._hot_mask.shape == raw16.shape[:2]:
             crop[self._hot_mask[y0:y0 + sh, x0:x0 + sw]] = 0
         binned = crop.reshape(sh // 2, 2, sw // 2, 2).sum(axis=(1, 3))
         binned = cv2.GaussianBlur(binned, (0, 0), 1.0)
@@ -549,7 +551,7 @@ class LiveStack:
 
         # 最新フレーム（raw16 Bayer float32）
         latest_f32 = self.buffer[latest_index].astype(np.float32)
-        if self.dark_frame is not None:
+        if self.dark_frame is not None and self.dark_enabled:
             latest_f32 = np.clip(latest_f32 - self.dark_frame, 0, None)
             self._fix_hot(latest_f32)
 
@@ -575,7 +577,7 @@ class LiveStack:
                 break
 
             past_f32 = past_raw16.astype(np.float32)
-            if self.dark_frame is not None:
+            if self.dark_frame is not None and self.dark_enabled:
                 past_f32 = np.clip(past_f32 - self.dark_frame, 0, None)
                 self._fix_hot(past_f32)
 
@@ -763,6 +765,10 @@ class SettingsMenu:
             {
                 "name": "Align",
                 "value": True
+            },
+            {
+                "name": "Dark Sub",
+                "value": True
             }
         ]
         self.selected_item = 0
@@ -861,7 +867,7 @@ class SettingsMenu:
         elif setting["name"] == "Stack Mode":
             setting["value"] = not setting["value"]
 
-        elif setting["name"] in ("Info Display", "Align"):
+        elif setting["name"] in ("Info Display", "Align", "Dark Sub"):
             setting["value"] = not setting["value"]
 
         elif setting["name"] == "Stop Ratio(%)":
@@ -923,7 +929,7 @@ class SettingsMenu:
                 value_text = setting["value"]
             elif setting["name"] == "Stack Mode":
                 value_text = "ON" if setting["value"] else "OFF"
-            elif setting["name"] in ("Info Display", "Align"):
+            elif setting["name"] in ("Info Display", "Align", "Dark Sub"):
                 value_text = "ON" if setting["value"] else "OFF"
             elif setting["name"] == "Stop Ratio(%)":
                 value_text = f"{int(setting['value'])}%"
@@ -962,9 +968,10 @@ class SettingsMenu:
             "stop_ratio_percent": int(values_by_name.get("Stop Ratio(%)", 10)),
             "align_size_percent": int(values_by_name.get("Align Size(%)", 50)),
             "align_enabled": bool(values_by_name.get("Align", True)),
+            "dark_enabled": bool(values_by_name.get("Dark Sub", True)),
         }
 
-    def set_current_values(self, camera, gain, exposure, max_frames, stack_mode, info_display=True, size_label="N/A", stop_ratio_percent=10, stop_threshold=255, align_size_percent=50, align_enabled=True):
+    def set_current_values(self, camera, gain, exposure, max_frames, stack_mode, info_display=True, size_label="N/A", stop_ratio_percent=10, stop_threshold=255, align_size_percent=50, align_enabled=True, dark_enabled=True):
         """現在の設定値を更新"""
         values = {
             "Camera": camera,
@@ -978,6 +985,7 @@ class SettingsMenu:
             "Stop Ratio(%)": int(stop_ratio_percent),
             "Align Size(%)": int(align_size_percent),
             "Align": bool(align_enabled),
+            "Dark Sub": bool(dark_enabled),
         }
 
         for setting in self.settings:
@@ -1019,6 +1027,54 @@ def flip_bayer_key(bayer_key, flip_h, flip_v, width, height):
     if flip_v and height % 2 == 0:
         top, bottom = bottom, top
     return top + bottom
+
+
+class SerReader:
+    """--source に .ser を指定したときのファイル入力。本アプリの SER 保存形式(16bit Bayer, リトルエンディアン)を読む。"""
+
+    HEADER_SIZE = 178
+    COLOR_ID_TO_BAYER = {11: "RGGB", 10: "GRBG", 9: "GBRG", 8: "BGGR"}
+
+    def __init__(self, path):
+        import struct
+        self.path = path
+        self._f = open(path, "rb")
+        try:
+            head = self._f.read(self.HEADER_SIZE)
+            if len(head) < self.HEADER_SIZE or head[:14] != b"LUCAM-RECORDER":
+                raise ValueError("SERヘッダーではありません")
+            color_id, _little, w, h, depth, n = struct.unpack_from("<6I", head, 18)
+            if depth != 16:
+                raise ValueError(f"未対応の PixelDepth: {depth} (16bitのみ対応)")
+            self.width, self.height = w, h
+            self.bayer = self.COLOR_ID_TO_BAYER.get(color_id)
+            self.frame_size = w * h * 2
+            # ヘッダーのフレーム数が0(録画中断)やファイルより多い場合はファイルサイズから求める
+            avail = (os.fstat(self._f.fileno()).st_size - self.HEADER_SIZE) // self.frame_size
+            self.frame_count = min(n, avail) if n > 0 else avail
+            if self.frame_count <= 0:
+                raise ValueError("フレームがありません")
+        except Exception:
+            self._f.close()
+            raise
+        self._idx = 0
+
+    @property
+    def position(self):
+        """直近に返したフレームの番号(1始まり)。"""
+        return self._idx
+
+    def next_frame(self):
+        """次のフレームのバイト列を返す。最後まで読んだら先頭に戻る。"""
+        if self._idx >= self.frame_count:
+            self._idx = 0
+        self._f.seek(self.HEADER_SIZE + self._idx * self.frame_size)
+        data = self._f.read(self.frame_size)
+        self._idx += 1
+        return data
+
+    def close(self):
+        self._f.close()
 
 
 def save_ser(frames, filename, bayer_key, bits, width, height, lsb=False):
@@ -1184,7 +1240,28 @@ def _ssh_kill_rpicam(client, pid, ssh_host):
 # ---------------------------------------------------------------------------
 
 def run_raw_live_stack(args):
-    host, port = parse_tcp_source(args.source)
+    ser_reader = None
+    if args.source.lower().endswith(".ser"):
+        try:
+            ser_reader = SerReader(args.source)
+        except (OSError, ValueError) as e:
+            print(f"[error] SER読み込み失敗: {args.source}  ({e})")
+            return
+        # ヘッダーが宸法を持つので、ソケット用の設定やクロップは無効化する
+        args.width, args.height = ser_reader.width, ser_reader.height
+        args.raw_width = args.raw_height = None
+        args.crop_x = args.crop_y = 0
+        args.wire_format = None
+        args.stride = None
+        args.ssh_host = None
+        if ser_reader.bayer:
+            args.bayer = ser_reader.bayer
+        if args.bits is None:
+            args.bits = 12  # SERは16bit容器で有効ビット深度を持たない
+        host = port = None
+        print(f"[SER] 入力ファイル: {args.source}  {ser_reader.width}x{ser_reader.height}  {ser_reader.frame_count}フレーム (ループ再生)  bayer={args.bayer} bits={args.bits} {'LSB詰め' if args.ser_lsb else 'MSB詰め'}")
+    else:
+        host, port = parse_tcp_source(args.source)
 
     raw_w = args.raw_width if args.raw_width is not None else args.width
     raw_h = args.raw_height if args.raw_height is not None else args.height
@@ -1229,13 +1306,26 @@ def run_raw_live_stack(args):
         print("[SSH] rpicam-raw 起動待ち (2秒)...")
         time.sleep(2)
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(args.timeout)
-    sock.connect((host, port))
-    print("[RAW] 接続成功")
+    sock = None
+    if ser_reader is None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(args.timeout)
+        sock.connect((host, port))
+        print("[RAW] 接続成功")
 
     try:
-        if args.stride is not None:
+        if ser_reader is not None:
+            fmt = {
+                "name": "SER 16bit",
+                "bits": 16,
+                "stride": ser_reader.width * 2,
+                "frame_size": ser_reader.frame_size,
+            }
+            candidates = [fmt]
+            fmt_idx = 0
+            buf = bytearray()
+            first_frame_bytes = ser_reader.next_frame()
+        elif args.stride is not None:
             if args.bits is None:
                 print("[error] --stride 指定時は --bits も必須です")
                 return
@@ -1267,7 +1357,14 @@ def run_raw_live_stack(args):
             fmt, candidates, first_frame_bytes, buf = probe_format(sock, raw_w, raw_h, args.bits)
             fmt_idx = candidates.index(fmt)
 
-        effective_info = resolve_effective_bits_and_shift(args, fmt, raw_w, raw_h, first_frame_bytes)
+        if ser_reader is not None:
+            effective_info = {
+                "effective_bits": int(args.bits),
+                "effective_shift": 0 if args.ser_lsb else 16 - int(args.bits),
+                "message": None,
+            }
+        else:
+            effective_info = resolve_effective_bits_and_shift(args, fmt, raw_w, raw_h, first_frame_bytes)
         effective_bits = effective_info["effective_bits"]
         effective_shift = effective_info["effective_shift"]
         if effective_info["message"]:
@@ -1304,9 +1401,10 @@ def run_raw_live_stack(args):
             live_stack.overflow_ratio_threshold = max(0.01, min(0.50, args.stop_ratio / 100.0))
         live_stack.align_ratio = max(0.1, min(1.0, args.align_size / 100.0))
         live_stack.align_enabled = not args.no_align
+        live_stack.dark_enabled = not args.no_dark_sub
 
         settings_menu = SettingsMenu()
-        stream_menu_names = {"Max Frames", "Stack Mode", "Info Display", "Stop Threshold", "Stop Ratio(%)", "Align Size(%)", "Align"}
+        stream_menu_names = {"Max Frames", "Stack Mode", "Info Display", "Stop Threshold", "Stop Ratio(%)", "Align Size(%)", "Align", "Dark Sub"}
         # Stop Threshold の範囲をビット深度に合わせて更新
         max_val = (1 << effective_bits) - 1
         for _s in settings_menu.settings:
@@ -1333,6 +1431,7 @@ def run_raw_live_stack(args):
             stop_threshold=live_stack.brightness_threshold,
             align_size_percent=int(round(live_stack.align_ratio * 100)),
             align_enabled=live_stack.align_enabled,
+            dark_enabled=live_stack.dark_enabled,
         )
 
         screen_size = get_screen_size()
@@ -1423,7 +1522,7 @@ def run_raw_live_stack(args):
         cv2.setMouseCallback(PREVIEW_WINDOW_NAME, on_mouse)
 
         print("\n操作: [q]終了  [m]設定メニュー  [i]情報表示  [s]PNG保存  [r]NPY保存  [f]FITS保存")
-        print("       [n]次候補フォーマット  [+/-]skip±1行  [a]ストレッチ切替  [A]位置合わせ切替  [b]Bayer切替")
+        print("       [n]次候補フォーマット  [+/-]skip±1行  [a]ストレッチ切替  [A]位置合わせ切替  [E]ダーク減算切替  [b]Bayer切替")
         print("       [o]停止判定モード切替（超過フレームを含む/含まない）")
         print("       [h]左右反転  [v]上下反転  [H]ヒストグラム切替  [t]LiveStack ON/OFF  [R]LiveStackリセット")
         print("       [w]白点クリックWB  [W]WBリセット  [g]ガンマ調整モード  [G]ガンマリセット")
@@ -1457,6 +1556,8 @@ def run_raw_live_stack(args):
         if live_stack.dark_frame is not None:
             _hud_msgs.append((f"[dark] {args.dark_file} 読み込み済み", time.time() + 6))
         frame_bytes = first_frame_bytes
+        _ser_interval = 1.0 / max(args.ser_fps, 0.01)
+        _ser_next_t = time.perf_counter()
 
         # --- バックグラウンドスタックスレッド ---
         _stack_event = threading.Event()   # 新フレーム追加を通知
@@ -1621,7 +1722,8 @@ def run_raw_live_stack(args):
                 bayer_name = bayer_keys[bayer_idx]
                 lines = [
                     f"{args.source}",
-                    f"{src_w}x{src_h}  frame#{frame_count}",
+                    f"{src_w}x{src_h}  frame#{frame_count}"
+                    + (f"  SER {ser_reader.position}/{ser_reader.frame_count}" if ser_reader is not None else ""),
                     f"{fmt['name'].strip()} | Bayer:{bayer_name} | {stretch_label} | Stack:{'ON' if stack_enabled else 'OFF'}",
                 ]
                 if args.wire_format in ("12u", "10u", "16u"):
@@ -1788,7 +1890,12 @@ def run_raw_live_stack(args):
             cv2.imshow(PREVIEW_WINDOW_NAME, preview_frame)
 
             # --- キー入力 ---
-            key_raw = cv2.waitKeyEx(1)
+            if ser_reader is not None:
+                # 次フレームの時刻までキー入力を待つ（常に --ser-fps で再生速度を制限）
+                key_raw = cv2.waitKeyEx(max(1, int((_ser_next_t - time.perf_counter()) * 1000)))
+                _ser_next_t = max(_ser_next_t + _ser_interval, time.perf_counter())
+            else:
+                key_raw = cv2.waitKeyEx(1)
             key = key_raw & 0xFF
 
             # 設定メニュー優先
@@ -1815,6 +1922,10 @@ def run_raw_live_stack(args):
                         live_stack.align_enabled = values["align_enabled"]
                         do_stack_reset()
                         print(f"[align] {'ON' if live_stack.align_enabled else 'OFF'}")
+                    if values["dark_enabled"] != live_stack.dark_enabled:
+                        live_stack.dark_enabled = values["dark_enabled"]
+                        do_stack_reset()
+                        print(f"[dark] 減算: {'ON' if live_stack.dark_enabled else 'OFF'}")
                 continue
 
             if key == ord("q"):
@@ -1866,6 +1977,7 @@ def run_raw_live_stack(args):
                         stop_threshold=live_stack.brightness_threshold,
                         align_size_percent=int(round(live_stack.align_ratio * 100)),
                         align_enabled=live_stack.align_enabled,
+                        dark_enabled=live_stack.dark_enabled,
                     )
                     print("設定メニューを開きました")
                 else:
@@ -2039,6 +2151,14 @@ def run_raw_live_stack(args):
                         break
                 do_stack_reset()  # 位置が混在しないようバッファを捨てる
                 print(f"[align] {'ON' if live_stack.align_enabled else 'OFF'}")
+            elif key == ord("E"):
+                live_stack.dark_enabled = not live_stack.dark_enabled
+                for s in settings_menu.settings:
+                    if s["name"] == "Dark Sub":
+                        s["value"] = live_stack.dark_enabled
+                        break
+                do_stack_reset()
+                print(f"[dark] 減算: {'ON' if live_stack.dark_enabled else 'OFF'}")
             elif key == ord("h"):
                 flip_h = not flip_h
                 print(f"左右反転: {'ON' if flip_h else 'OFF'}")
@@ -2082,6 +2202,7 @@ def run_raw_live_stack(args):
                 args.stop_ratio = round(live_stack.overflow_ratio_threshold * 100.0, 1)
                 args.align_size = int(round(live_stack.align_ratio * 100))
                 args.no_align = not live_stack.align_enabled
+                args.no_dark_sub = not live_stack.dark_enabled
                 args.wb_b = round(float(wb_gains[0]), 3)
                 args.wb_g = round(float(wb_gains[1]), 3)
                 args.wb_r = round(float(wb_gains[2]), 3)
@@ -2099,18 +2220,21 @@ def run_raw_live_stack(args):
                 do_stack_reset()
                 print(f"[switch] フォーマット: {fmt['name'].strip()}")
                 buf.clear()
-            elif key == ord("+") or key == ord("="):
+            elif (key == ord("+") or key == ord("=")) and ser_reader is None:
                 skip += fmt["stride"]
                 do_stack_reset()
                 print(f"[skip] +{fmt['stride']} -> skip={skip}")
                 buf.clear()
-            elif key == ord("-"):
+            elif key == ord("-") and ser_reader is None:
                 skip = max(0, skip - fmt["stride"])
                 do_stack_reset()
                 print(f"[skip] -{fmt['stride']} -> skip={skip}")
                 buf.clear()
 
             # --- 次フレーム受信 ---
+            if ser_reader is not None:
+                frame_bytes = ser_reader.next_frame()
+                continue
             total_size = skip + fmt["frame_size"]
             sock.settimeout(args.timeout)
             while len(buf) < total_size:
@@ -2145,7 +2269,10 @@ def run_raw_live_stack(args):
                                 bayer_keys[bayer_idx], len(live_stack.dark_buffer))
         except Exception:
             pass
-        sock.close()
+        if sock is not None:
+            sock.close()
+        if ser_reader is not None:
+            ser_reader.close()
         cv2.destroyAllWindows()
         _ssh_kill_rpicam(_ssh_client, _rpicam_pid, args.ssh_host or "")
         print("RAW Live Stack終了")
@@ -2153,7 +2280,7 @@ def run_raw_live_stack(args):
 
 def build_arg_parser():
     parser = argparse.ArgumentParser(description="RAW Live Stack (rpicam-raw TCP receiver + LiveStack)")
-    parser.add_argument("--source", required=True, help="接続先 (例: tcp://192.168.1.17:8888)")
+    parser.add_argument("--source", required=True, help="接続先 (例: tcp://192.168.1.17:8888)。.ser を指定するとファイルをループ再生するテストモード")
     parser.add_argument("--width", type=int, default=3840, help="表示/クロップ幅 (デフォルト: 3840)")
     parser.add_argument("--height", type=int, default=2160, help="表示/クロップ高さ (デフォルト: 2160)")
     parser.add_argument("--raw-width", type=int, default=None, help="実センサーRAW幅 (省略時=--width。例: IMX678=3856)")
@@ -2170,7 +2297,8 @@ def build_arg_parser():
     parser.add_argument("--timeout", type=int, default=120, help="受信タイムアウト秒 (デフォルト: 120)")
     parser.add_argument("--no-stretch", action="store_true", help="自動ストレッチを無効化 (デフォルト: ストレッチ有効)")
     parser.add_argument("--max-frames", type=int, default=100, help="LiveStack最大フレーム数 (デフォルト: 100)")
-    parser.add_argument("--ser-lsb", action="store_true", help="SER書き出しを下位詰め(LSB-aligned)にする (デフォルト: 上位詰めMSB-aligned)")
+    parser.add_argument("--ser-fps", type=float, default=5.0, help="SERファイル入力時の再生フレームレート (デフォルト: 5)")
+    parser.add_argument("--ser-lsb", action="store_true", help="SER書き出し/読み込みを下位詰め(LSB-aligned)にする (デフォルト: 上位詰めMSB-aligned)")
     parser.add_argument("--ser-flip", action="store_true", help="SER録画にも上下左右反転を反映する (録画開始時の状態で固定、ColorIDも反転後のBayerに更新)")
     parser.add_argument("--flip-h", action="store_true", help="左右反転して起動")
     parser.add_argument("--flip-v", action="store_true", help="上下反転して起動")
@@ -2185,6 +2313,7 @@ def build_arg_parser():
     parser.add_argument("--align-size", type=int, default=50,
                         help="位置合わせ検出窓の大きさ 画像幅/高さに対する%% (10−100、デフォルト: 50)")
     parser.add_argument("--no-align", action="store_true", help="位置合わせを無効化して単純加算 ([A]キー/メニューで切替可)")
+    parser.add_argument("--no-dark-sub", action="store_true", help="ダーク減算とホットピクセル補間を無効化 ([E]キー/メニューで切替可)")
     parser.add_argument("--wb-b", type=float, default=None, help="初期WBゲイン B (デフォルト: 1.0)")
     parser.add_argument("--wb-g", type=float, default=None, help="初期WBゲイン G (デフォルト: 1.0)")
     parser.add_argument("--wb-r", type=float, default=None, help="初期WBゲイン R (デフォルト: 1.0)")
@@ -2276,7 +2405,7 @@ def main():
 
     args = parser.parse_args()
 
-    if args.no_ssh:
+    if args.no_ssh or (args.source and args.source.lower().endswith(".ser")):
         args.ssh_host = None
 
     if args.source is None:

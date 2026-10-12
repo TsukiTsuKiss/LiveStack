@@ -161,6 +161,12 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 **SER反転オプション:**
 - `--ser-flip`: SER録画にも `--flip-h`/`--flip-v`（`[h]`/`[v]`）の状態を反映（録画開始時に固定、ColorIDも更新）。既定ではSERは生Bayerのまま反転しない。理由は `仕様.md` の「SER録画機能」を参照
 
+**SER入力テストモード（カメラ不要）:**
+- `--source file.ser`: `raw_live_stack.py` でSERファイルをループ再生して入力する。メニューやキー操作の確認用。幅・高さ・Bayerはヘッダーから取得（`--raw-width` / `--stride` / `--wire-format` / `--crop-*` / SSHは無視）
+- `--bits`: 有効ビット深度（SERは16bit容器のため未指定時は12）。`--ser-lsb` を付けない限り上位詰め(MSB)として読む
+- `--ser-fps`: 再生フレームレート（デフォルト 5）
+- `[+]`/`[-]`（skip）は無効。スタックオンで録画したSERはダーク減算済みの加算値なので、`[E]` でダーク減算をOFFにして使う
+
 **SSH連携オプション（CLIまたはJSONで指定）:**
 - `--ssh-host <IP>`: Pi側ホスト。指定時に起動・終了を自動制御
 - `--ssh-user <user>`: SSHユーザー名（デフォルト: `pi`）
@@ -221,6 +227,7 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - **Stop Ratio(%)**: 1～50（1刻み） - 停止条件となる割合
 - **Align Size(%)**: 10～100（10刻み） - 位置合わせ検出窓の大きさ（画像幅/高さに対する割合、デフォルト 50）。`raw_live_stack.py` のみ適用
 - **Align**: ON/OFF - 位置合わせの有効/無効（`[A]`キーでも切替、`--no-align` で無効起動）。切替時にスタックをリセット。`raw_live_stack.py` のみ適用
+- **Dark Sub**: ON/OFF - ダーク減算とホットピクセル補間の有効/無効（`[E]`キーでも切替、`--no-dark-sub` で無効起動）。ダーク減算済みのSERを入力する場合などに使用。切替時にスタックをリセット。`raw_live_stack.py` のみ適用
 
 **操作方法:**
 - **上下矢印**: 設定項目選択
