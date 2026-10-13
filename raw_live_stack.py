@@ -16,6 +16,8 @@ rpicam-raw TCP生ストリーム専用ライブスタック
     [i] 情報表示 ON/OFF
     [s] PNG保存 (WB/ガンマ適用後、tEXtメタデータ付き)
     [j] JPEG保存 (WB/ガンマ適用後、EXIF付き)
+    [c] 操作メニュー (保存/SER録画/WB・ガンマ・スタックリセット/ズーム/ダーク/JSON保存をメニューから実行)
+    [y] 画面録画AVI (info/ヒストグラム/メニュー等のオーバーレイ込み、MJPG)
     [S]/[x] SER保存 (バッファ全フレームをマルチフレームSER)
     [r] NPY保存 (16bit RAW展開後)
     [f] FITS保存
@@ -710,6 +712,20 @@ class SettingsMenu:
                 "values": ["N/A"]
             },
             {
+                "name": "Stop Threshold",
+                "value": 255,
+                "min": 5,
+                "max": 255,
+                "step": 5
+            },
+            {
+                "name": "Stop Ratio(%)",
+                "value": 10,
+                "min": 1,
+                "max": 50,
+                "step": 1
+            },
+            {
                 "name": "Gain",
                 "value": 2.0,
                 "min": 1.0,
@@ -745,26 +761,24 @@ class SettingsMenu:
                 "step": 1
             },
             {
-                "name": "Stack Mode",
-                "value": False
-            },
-            {
                 "name": "Info Display",
                 "value": True
             },
             {
-                "name": "Stop Threshold",
-                "value": 255,
-                "min": 5,
-                "max": 255,
-                "step": 5
+                "name": "Histogram",
+                "value": True
             },
             {
-                "name": "Stop Ratio(%)",
-                "value": 10,
-                "min": 1,
-                "max": 50,
-                "step": 1
+                "name": "Flip H",
+                "value": False
+            },
+            {
+                "name": "Flip V",
+                "value": False
+            },
+            {
+                "name": "SER Flip",
+                "value": False
             },
             {
                 "name": "Align Size(%)",
@@ -780,6 +794,10 @@ class SettingsMenu:
             {
                 "name": "Dark Sub",
                 "value": True
+            },
+            {
+                "name": "Stack Mode",
+                "value": False
             }
         ]
         self.selected_item = 0
@@ -861,7 +879,7 @@ class SettingsMenu:
         elif setting["name"] == "Stack Mode":
             setting["value"] = not setting["value"]
 
-        elif setting["name"] in ("Info Display", "Align", "Dark Sub"):
+        elif setting["name"] in ("Info Display", "Histogram", "Flip H", "Flip V", "SER Flip", "Align", "Dark Sub"):
             setting["value"] = not setting["value"]
 
         elif setting["name"] == "Stop Ratio(%)":
@@ -904,7 +922,7 @@ class SettingsMenu:
 
         # タイトル
         cv2.putText(frame, "Settings Menu", (x0 + 10, y0 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-        cv2.putText(frame, "Up/Down: Select Item  Left/Right: Change Value",
+        cv2.putText(frame, "Up/Down: Select Item  Left/Right: Change Value  c: Control Menu",
                    (x0 + 10, y0 + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
         cv2.putText(frame, "Left/Right: Apply Immediately  Enter: Re-Apply  ESC: Cancel",
                    (x0 + 10, y0 + 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
@@ -923,7 +941,13 @@ class SettingsMenu:
                 value_text = setting["value"]
             elif setting["name"] == "Stack Mode":
                 value_text = "ON" if setting["value"] else "OFF"
-            elif setting["name"] in ("Info Display", "Align", "Dark Sub"):
+            elif setting["name"] == "SER Flip":
+                value_text = "ON" if setting["value"] else "OFF"
+                # SER録画の反転は画面側の反転(Flip H/V)がONのときだけ効く
+                flips = {t["name"]: t["value"] for t in self.settings if t["name"] in ("Flip H", "Flip V")}
+                if setting["value"] and flips and not any(flips.values()):
+                    value_text += " (inactive: Flip H/V OFF)"
+            elif setting["name"] in ("Info Display", "Histogram", "Flip H", "Flip V", "Align", "Dark Sub"):
                 value_text = "ON" if setting["value"] else "OFF"
             elif setting["name"] == "Stop Ratio(%)":
                 value_text = f"{int(setting['value'])}%"
@@ -958,6 +982,10 @@ class SettingsMenu:
             "max_frames": int(values_by_name.get("Max Frames", 100)),
             "stack_mode": bool(values_by_name.get("Stack Mode", False)),
             "info_display": bool(values_by_name.get("Info Display", True)),
+            "hist_display": bool(values_by_name.get("Histogram", True)),
+            "flip_h": bool(values_by_name.get("Flip H", False)),
+            "flip_v": bool(values_by_name.get("Flip V", False)),
+            "ser_flip": bool(values_by_name.get("SER Flip", False)),
             "stop_threshold": int(values_by_name.get("Stop Threshold", 255)),
             "stop_ratio_percent": int(values_by_name.get("Stop Ratio(%)", 10)),
             "align_size_percent": int(values_by_name.get("Align Size(%)", 50)),
@@ -965,7 +993,7 @@ class SettingsMenu:
             "dark_enabled": bool(values_by_name.get("Dark Sub", True)),
         }
 
-    def set_current_values(self, camera, gain, exposure, max_frames, stack_mode, info_display=True, size_label="N/A", stop_ratio_percent=10, stop_threshold=255, align_size_percent=50, align_enabled=True, dark_enabled=True):
+    def set_current_values(self, camera, gain, exposure, max_frames, stack_mode, info_display=True, hist_display=True, flip_h=False, flip_v=False, ser_flip=False, size_label="N/A", stop_ratio_percent=10, stop_threshold=255, align_size_percent=50, align_enabled=True, dark_enabled=True):
         """現在の設定値を更新"""
         values = {
             "Camera": camera,
@@ -975,6 +1003,10 @@ class SettingsMenu:
             "Max Frames": max_frames,
             "Stack Mode": stack_mode,
             "Info Display": info_display,
+            "Histogram": bool(hist_display),
+            "Flip H": bool(flip_h),
+            "Flip V": bool(flip_v),
+            "SER Flip": bool(ser_flip),
             "Stop Threshold": int(stop_threshold),
             "Stop Ratio(%)": int(stop_ratio_percent),
             "Align Size(%)": int(align_size_percent),
@@ -1010,6 +1042,76 @@ class SettingsMenu:
 # ---------------------------------------------------------------------------
 # 保存ユーティリティ
 # ---------------------------------------------------------------------------
+
+class ControlMenu:
+    """操作メニュー: 選んだ項目を対応するキー操作として実行する（Shiftが使えない環境向け）"""
+
+    ITEMS = [
+        ("Save PNG", "s", None),
+        ("Save JPEG", "j", None),
+        ("Save FITS", "f", None),
+        ("Save NPY", "r", None),
+        ("SER Rec", "S", "rec"),
+        ("Screen Rec (AVI)", "y", "scr"),
+        ("Zoom", "z", "zoom"),
+        ("Click WB", "w", "click_wb"),
+        ("WB Reset", "W", None),
+        ("Gamma Reset", "G", None),
+        ("Stack Reset", "R", None),
+        ("Dark Capture", "d", None),
+        ("Dark Clear", "D", None),
+        ("Save Config JSON", "C", None),
+    ]
+
+    def __init__(self):
+        self.menu_active = False
+        self.selected_item = 0
+
+    def toggle(self):
+        self.menu_active = not self.menu_active
+
+    def handle_key(self, key_raw):
+        """(キーを消費したか, 実行するキー文字コードまたはNone) を返す"""
+        if not self.menu_active:
+            return False, None
+        key, nav = decode_key(key_raw)
+        if nav == "up":
+            self.selected_item = (self.selected_item - 1) % len(self.ITEMS)
+            return True, None
+        if nav == "down":
+            self.selected_item = (self.selected_item + 1) % len(self.ITEMS)
+            return True, None
+        if key in (10, 13):
+            return True, ord(self.ITEMS[self.selected_item][1])
+        if key == 27:
+            self.menu_active = False
+            return True, None
+        return False, None
+
+    def draw_menu(self, frame, states):
+        """states: 状態項目名 -> bool"""
+        if not self.menu_active:
+            return frame
+        menu_w = 420
+        menu_h = 90 + len(self.ITEMS) * 30 + 10
+        x0, y0 = 500, 10
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (x0, y0), (x0 + menu_w, y0 + menu_h), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+        cv2.putText(frame, "Control Menu", (x0 + 10, y0 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(frame, "Up/Down: Select  Enter: Run  ESC/c: Close  m: Settings",
+                    (x0 + 10, y0 + 58), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        for i, (label, _key, state_name) in enumerate(self.ITEMS):
+            y_pos = y0 + 95 + i * 30
+            color = (0, 255, 0) if i == self.selected_item else (255, 255, 255)
+            text = label
+            if state_name is not None:
+                text += f": {'ON' if states.get(state_name) else 'OFF'}"
+            cv2.putText(frame, text, (x0 + 30, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
+            if i == self.selected_item:
+                cv2.putText(frame, ">", (x0 + 5, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
+        return frame
+
 
 def flip_bayer_key(bayer_key, flip_h, flip_v, width, height):
     """反転後のBayerパターン名を返す（偶数サイズのときのみパターンが入れ替わる）"""
@@ -1403,7 +1505,8 @@ def run_raw_live_stack(args):
         live_stack.dark_enabled = not args.no_dark_sub
 
         settings_menu = SettingsMenu()
-        stream_menu_names = {"Max Frames", "Stack Mode", "Info Display", "Stop Threshold", "Stop Ratio(%)", "Align Size(%)", "Align", "Dark Sub"}
+        control_menu = ControlMenu()
+        stream_menu_names = {"Max Frames", "Stack Mode", "Info Display", "Histogram", "Flip H", "Flip V", "SER Flip", "Stop Threshold", "Stop Ratio(%)", "Align Size(%)", "Align", "Dark Sub"}
         # Stop Threshold の範囲をビット深度に合わせて更新
         max_val = (1 << effective_bits) - 1
         for _s in settings_menu.settings:
@@ -1425,6 +1528,10 @@ def run_raw_live_stack(args):
             max_frames=max_frames,
             stack_mode=False,
             info_display=True,
+            hist_display=show_hist,
+            flip_h=args.flip_h,
+            flip_v=args.flip_v,
+            ser_flip=args.ser_flip,
             size_label="N/A",
             stop_ratio_percent=int(live_stack.overflow_ratio_threshold * 100),
             stop_threshold=live_stack.brightness_threshold,
@@ -1528,6 +1635,8 @@ def run_raw_live_stack(args):
         print("       [h]左右反転  [v]上下反転  [H]ヒストグラム切替  [t]LiveStack ON/OFF  [R]LiveStackリセット")
         print("       [w]白点クリックWB  [W]/[u]WBリセット(Qt版OpenCVはShift不可のため[u])  [g]ガンマ調整モード  [G]ガンマリセット")
         print("       [d]ダークフレーム取得（レンズキャップして押す）  [D]ダーククリア")
+        print("       [c]操作メニュー（保存・SER録画・リセット・ズーム等をメニューから実行）")
+        print("       [y]画面録画AVI開始/停止（info/ヒストグラム/メニュー込み。SNS用デモ向け）")
         print("       [S]/[x]SER録画開始/停止トグル（Linux/Qt版OpenCVではShiftが効かないため[x]を使用）")
         if ser_reader is not None:
             print("       [space]一時停止/再生  [,][.]コマ戻し/送り  [[][]]先頭/末尾へ  [l]ループ切替")
@@ -1547,6 +1656,13 @@ def run_raw_live_stack(args):
             return (1.0 - alpha) * prev + alpha * value
 
         # --- SERトグル録画状態 ---
+        # 画面録画（info/ヒストグラム/メニュー等のオーバーレイ込みのプレビューをAVIに保存）
+        _scr_writer = None
+        _scr_fname = None
+        _scr_size = None
+        _scr_frames = 0
+        _scr_interval = 1.0 / max(args.screen_fps, 1.0)
+        _scr_next_t = 0.0
         _ser_recording = False
         _ser_file = None       # 開くと BytesIO ではなく直接 open()
         _ser_frame_count = 0
@@ -1823,6 +1939,10 @@ def run_raw_live_stack(args):
 
             if settings_menu.menu_active:
                 preview_frame = settings_menu.draw_menu(preview_frame)
+            if control_menu.menu_active:
+                preview_frame = control_menu.draw_menu(preview_frame, {
+                    "rec": _ser_recording, "scr": _scr_writer is not None, "zoom": zoom_mode, "click_wb": click_wb_mode,
+                })
 
             # --- REC インジケータ ---
             if _ser_recording:
@@ -1901,6 +2021,24 @@ def run_raw_live_stack(args):
                     print(f"[zoom error] {_e}")
                     traceback.print_exc()
 
+            # --- 画面録画 ---
+            if _scr_writer is not None:
+                now_p = time.perf_counter()
+                if now_p >= _scr_next_t:
+                    out_frame = preview_frame
+                    if (preview_frame.shape[1], preview_frame.shape[0]) != _scr_size:
+                        out_frame = cv2.resize(preview_frame, _scr_size)
+                    # 処理が遅れた分は同じフレームを複製して実時間の長さを保つ
+                    n_dup = min(int((now_p - _scr_next_t) / _scr_interval) + 1, 10)
+                    for _ in range(n_dup):
+                        _scr_writer.write(out_frame)
+                    _scr_frames += n_dup
+                    _scr_next_t = now_p + _scr_interval if n_dup == 10 else _scr_next_t + n_dup * _scr_interval
+                # 録画インジケータは録画フレームに写さないよう書き込み後に描画
+                cv2.circle(preview_frame, (18, 18), 8, (0, 140, 255), -1)
+                cv2.putText(preview_frame, f"SCR {_scr_frames}f", (32, 24),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 140, 255), 1, cv2.LINE_AA)
+
             cv2.imshow(PREVIEW_WINDOW_NAME, preview_frame)
 
             # --- キー入力 ---
@@ -1911,6 +2049,20 @@ def run_raw_live_stack(args):
             else:
                 key_raw = cv2.waitKeyEx(1)
             key, nav = decode_key(key_raw)
+
+            # 操作メニュー（[c]で開閉、Enterで対応するキー操作を実行）
+            if key == ord("c"):
+                if settings_menu.menu_active:
+                    settings_menu.menu_active = False
+                    control_menu.menu_active = True
+                else:
+                    control_menu.toggle()
+                continue
+            consumed, action_key = control_menu.handle_key(key_raw)
+            if action_key is not None:
+                key = action_key
+            elif consumed:
+                continue
 
             # 設定メニュー優先
             if settings_menu.handle_key(key_raw):
@@ -1929,6 +2081,18 @@ def run_raw_live_stack(args):
                     if values["info_display"] != info_display:
                         info_display = values["info_display"]
                         print(f"情報表示: {'ON' if info_display else 'OFF'}")
+                    if values["hist_display"] != show_hist:
+                        show_hist = values["hist_display"]
+                        print(f"[hist] ヒストグラム: {'ON' if show_hist else 'OFF'}")
+                    if values["flip_h"] != flip_h:
+                        flip_h = values["flip_h"]
+                        print(f"左右反転: {'ON' if flip_h else 'OFF'}")
+                    if values["flip_v"] != flip_v:
+                        flip_v = values["flip_v"]
+                        print(f"上下反転: {'ON' if flip_v else 'OFF'}")
+                    if values["ser_flip"] != bool(args.ser_flip):
+                        args.ser_flip = values["ser_flip"]
+                        print(f"[SER] 反転を録画に反映: {'ON' if args.ser_flip else 'OFF'} (次回の録画開始から有効)")
                     live_stack.overflow_ratio_threshold = max(0.01, min(0.50, values["stop_ratio_percent"] / 100.0))
                     live_stack.brightness_threshold = max(1, min((1 << live_stack.bits) - 1, values["stop_threshold"]))
                     live_stack.align_ratio = max(0.1, min(1.0, values["align_size_percent"] / 100.0))
@@ -1979,6 +2143,7 @@ def run_raw_live_stack(args):
             elif key == ord("m"):
                 settings_menu.menu_active = not settings_menu.menu_active
                 if settings_menu.menu_active:
+                    control_menu.menu_active = False
                     settings_menu.set_current_values(
                         camera=0,
                         gain=1.0,
@@ -1986,6 +2151,10 @@ def run_raw_live_stack(args):
                         max_frames=live_stack.max_frames,
                         stack_mode=stack_enabled,
                         info_display=info_display,
+                        hist_display=show_hist,
+                        flip_h=flip_h,
+                        flip_v=flip_v,
+                        ser_flip=args.ser_flip,
                         size_label="N/A",
                         stop_ratio_percent=int(live_stack.overflow_ratio_threshold * 100),
                         stop_threshold=live_stack.brightness_threshold,
@@ -2107,6 +2276,22 @@ def run_raw_live_stack(args):
                     _ser_recording = False
                     _ser_timestamps.clear()
                     print(f"[SER] 録画停止: {_ser_fname}  {_ser_frame_count}フレーム")
+            elif key == ord("y"):
+                if _scr_writer is None:
+                    _scr_size = (preview_frame.shape[1], preview_frame.shape[0])
+                    _scr_fname = f"{datetime.datetime.now():%Y%m%d_%H%M%S}_screen.avi"
+                    _scr_writer = cv2.VideoWriter(_scr_fname, cv2.VideoWriter_fourcc(*"MJPG"), args.screen_fps, _scr_size)
+                    if _scr_writer.isOpened():
+                        _scr_frames = 0
+                        _scr_next_t = time.perf_counter()
+                        print(f"[SCR] 画面録画開始: {_scr_fname}  {_scr_size[0]}x{_scr_size[1]} {args.screen_fps:g}fps (MJPG)")
+                    else:
+                        _scr_writer = None
+                        print("[SCR] 画面録画を開始できません (VideoWriter open失敗)")
+                else:
+                    _scr_writer.release()
+                    _scr_writer = None
+                    print(f"[SCR] 画面録画停止: {_scr_fname}  {_scr_frames}フレーム")
             elif key == ord("r") and last_raw16 is not None:
                 fname = f"{_save_stem()}.npy"
                 np.save(fname, last_raw16)
@@ -2175,12 +2360,24 @@ def run_raw_live_stack(args):
                 print(f"[dark] 減算: {'ON' if live_stack.dark_enabled else 'OFF'}")
             elif key == ord("h"):
                 flip_h = not flip_h
+                for s_item in settings_menu.settings:
+                    if s_item["name"] == "Flip H":
+                        s_item["value"] = flip_h
+                        break
                 print(f"左右反転: {'ON' if flip_h else 'OFF'}")
             elif key == ord("v"):
                 flip_v = not flip_v
+                for s_item in settings_menu.settings:
+                    if s_item["name"] == "Flip V":
+                        s_item["value"] = flip_v
+                        break
                 print(f"上下反転: {'ON' if flip_v else 'OFF'}")
             elif key == ord("H"):
                 show_hist = not show_hist
+                for s in settings_menu.settings:
+                    if s["name"] == "Histogram":
+                        s["value"] = show_hist
+                        break
                 print(f"[hist] ヒストグラム: {'ON' if show_hist else 'OFF'}")
             elif key == ord("t"):
                 stack_enabled = not stack_enabled
@@ -2300,6 +2497,9 @@ def run_raw_live_stack(args):
     except KeyboardInterrupt:
         print("\n[終了]")
     finally:
+        if _scr_writer is not None:
+            _scr_writer.release()
+            print(f"[SCR] 終了につき画面録画保存: {_scr_fname}  {_scr_frames}フレーム")
         if _ser_recording and _ser_file is not None:
             import struct
             for ts in _ser_timestamps:
@@ -2347,6 +2547,7 @@ def build_arg_parser():
     parser.add_argument("--no-stretch", action="store_true", help="自動ストレッチを無効化 (デフォルト: ストレッチ有効)")
     parser.add_argument("--max-frames", type=int, default=100, help="LiveStack最大フレーム数 (デフォルト: 100)")
     parser.add_argument("--ser-fps", type=float, default=5.0, help="SERファイル入力時の再生フレームレート (デフォルト: 5)")
+    parser.add_argument("--screen-fps", type=float, default=15.0, help="画面録画([y]キー/操作メニュー)のフレームレート (デフォルト: 15)")
     parser.add_argument("--ser-lsb", action="store_true", help="SER書き出し/読み込みを下位詰め(LSB-aligned)にする (デフォルト: 上位詰めMSB-aligned)")
     parser.add_argument("--ser-flip", action="store_true", help="SER録画にも上下左右反転を反映する (録画開始時の状態で固定、ColorIDも反転後のBayerに更新)")
     parser.add_argument("--flip-h", action="store_true", help="左右反転して起動")
