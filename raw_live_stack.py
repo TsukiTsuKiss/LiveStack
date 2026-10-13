@@ -99,6 +99,7 @@ WB_WINDOW_NAME = "RAW Stack WB"
 # スタック方式: 内部名 <-> メニュー表示名
 STACK_METHOD_LABELS = {"sum": "Sum", "lighten": "Lighten", "darken": "Darken", "median": "Median", "sigma": "Sigma Clip", "sigmasum": "Sigma Sum"}
 STACK_LABEL_TO_METHOD = {v: k for k, v in STACK_METHOD_LABELS.items()}
+SER_LOOP_LABELS = {"reset": "ON（先頭でスタックをリセット）", "continuous": "ON（リセットしない・加算を続ける）", "off": "OFF"}
 ZOOM_WINDOW_NAME = "RAW Live Stack - Zoom"
 
 
@@ -1361,7 +1362,7 @@ def run_raw_live_stack(args):
         print("       [y]画面録画AVI開始/停止（info/ヒストグラム/メニュー込み。SNS用デモ向け）")
         print("       [S]/[x]SER録画開始/停止トグル（Linux/Qt版OpenCVではShiftが効かないため[x]を使用）")
         if ser_reader is not None:
-            print("       [space]一時停止/再生  [,][.]コマ戻し/送り  [[][]]先頭/末尾へ  [l]ループ切替")
+            print("       [space]一時停止/再生  [,][.]コマ戻し/送り  [[][]]先頭/末尾へ  [l]ループ切替(リセット→継続→なし)")
 
         frame_count = 0
         last_raw16 = None      # 受信した生フレーム（ダーク取得・NPY・SER録画に使う。ダーク減算しない）
@@ -1396,7 +1397,7 @@ def run_raw_live_stack(args):
         _ser_interval = 1.0 / max(args.ser_fps, 0.01)
         _ser_next_t = time.perf_counter()
         ser_paused = False
-        ser_loop = True
+        ser_loop_mode = args.ser_loop_mode  # reset: 先頭に戻るときスタックをリセット / continuous: リセットせず続ける / off: 末尾で停止
         _frame_fresh = True  # False: 同じフレームの再表示(一時停止中)
 
         def _save_stem():
@@ -1580,7 +1581,7 @@ def run_raw_live_stack(args):
                 lines = [
                     f"{args.source}",
                     f"{src_w}x{src_h}  frame#{frame_count}"
-                    + (f"  SER {ser_reader.position}/{ser_reader.frame_count}{'  PAUSE' if ser_paused else ''}{'' if ser_loop else '  no-loop'}" if ser_reader is not None else ""),
+                    + (f"  SER {ser_reader.position}/{ser_reader.frame_count}{'  PAUSE' if ser_paused else ''}{'  loop:continuous' if ser_loop_mode == 'continuous' else ('' if ser_loop_mode == 'reset' else '  no-loop')}" if ser_reader is not None else ""),
                     f"{fmt['name'].strip()} | Bayer:{bayer_name} | {stretch_label} | Stack:{STACK_METHOD_LABELS[live_stack.stack_method] if stack_enabled else 'OFF'}",
                 ]
                 if args.wire_format in ("12u", "10u", "16u"):
@@ -2142,7 +2143,7 @@ def run_raw_live_stack(args):
                 buf.clear()
             elif ser_reader is not None and key == ord(" "):
                 ser_paused = not ser_paused
-                if not ser_paused and not ser_loop and ser_reader.position >= ser_reader.frame_count:
+                if not ser_paused and ser_loop_mode == 'off' and ser_reader.position >= ser_reader.frame_count:
                     frame_bytes = ser_reader.read_at(0)
                     do_stack_reset()
                     _frame_fresh = True
@@ -2150,7 +2151,7 @@ def run_raw_live_stack(args):
             elif ser_reader is not None and key in (ord("."), ord(",")):
                 ser_paused = True
                 if key == ord("."):
-                    if ser_reader.position >= ser_reader.frame_count:
+                    if ser_reader.position >= ser_reader.frame_count and ser_loop_mode != "continuous":
                         do_stack_reset()  # 末尾→先頭の連続しないフレーム
                     frame_bytes = ser_reader.next_frame()
                 else:
@@ -2164,14 +2165,16 @@ def run_raw_live_stack(args):
                 do_stack_reset()
                 _frame_fresh = True
             elif ser_reader is not None and key == ord("l"):
-                ser_loop = not ser_loop
-                print(f"[SER] ループ: {'ON' if ser_loop else 'OFF'}")
+                ser_loop_mode = {"reset": "continuous", "continuous": "off", "off": "reset"}[ser_loop_mode]
+                print(f"[SER] ループ: {SER_LOOP_LABELS[ser_loop_mode]}")
 
             # --- 次フレーム受信 ---
             if ser_reader is not None:
                 if not ser_paused and ser_reader.position >= ser_reader.frame_count:
-                    if ser_loop:
-                        do_stack_reset()  # 先頭に戻ると時系列が途切れる
+                    if ser_loop_mode != "off":
+                        if ser_loop_mode == "reset":
+                            do_stack_reset()  # 先頭に戻ると時系列が途切れる
+                        # continuous: リセットせず再生を続け、同じ映像を加算し続けてオーバーフローまで進める
                     else:
                         ser_paused = True
                         print("[SER] 末尾で停止 ([l]ループ切替, [space]で先頭から再生)")
@@ -2258,6 +2261,8 @@ def build_arg_parser():
     parser.add_argument("--max-frames", type=_max_frames_arg, default=100, help="LiveStack最大フレーム数 (デフォルト: 100)。'max' または 0 でメモリ見積もり上限まで使う")
     parser.add_argument("--ser-fps", type=float, default=5.0, help="SERファイル入力時の再生フレームレート (デフォルト: 5)")
     parser.add_argument("--screen-fps", type=float, default=15.0, help="画面録画([y]キー/操作メニュー)のフレームレート (デフォルト: 15)")
+    parser.add_argument("--ser-loop-mode", type=str, default="reset", choices=list(SER_LOOP_LABELS.keys()),
+                        help="SERファイル入力の末尾での動作 (デフォルト: reset)。reset=先頭に戻りスタックをリセット / continuous=リセットせず加算を続ける(フレーム不足でオーバーフローまで加算したいとき) / off=末尾で停止。[l]キーで切替")
     parser.add_argument("--ser-lsb", action="store_true", help="SER書き出し/読み込みを下位詰め(LSB-aligned)にする (デフォルト: 上位詰めMSB-aligned)")
     parser.add_argument("--ser-flip", action="store_true", help="SER録画にも上下左右反転を反映する (録画開始時の状態で固定、ColorIDも反転後のBayerに更新)")
     parser.add_argument("--flip-h", action="store_true", help="左右反転して起動")
