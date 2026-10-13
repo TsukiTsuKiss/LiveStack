@@ -97,7 +97,7 @@ from raw_utils import (
 PREVIEW_WINDOW_NAME = "RAW Live Stack"
 WB_WINDOW_NAME = "RAW Stack WB"
 # スタック方式: 内部名 <-> メニュー表示名
-STACK_METHOD_LABELS = {"sum": "Sum", "lighten": "Lighten", "darken": "Darken", "median": "Median", "sigma": "Sigma Clip"}
+STACK_METHOD_LABELS = {"sum": "Sum", "lighten": "Lighten", "darken": "Darken", "median": "Median", "sigma": "Sigma Clip", "sigmasum": "Sigma Sum"}
 STACK_LABEL_TO_METHOD = {v: k for k, v in STACK_METHOD_LABELS.items()}
 ZOOM_WINDOW_NAME = "RAW Live Stack - Zoom"
 
@@ -234,7 +234,7 @@ class LiveStack:
         self.overflow_ratio_threshold = 0.10  # 打ち切り比率（例: 0.10 = 10%）
         self.brightness_threshold = (1 << bits) - 1  # 打ち切り輝度しきい値（ネイティブビット深度で表現）
         self.include_overflow_frame = False  # True: しきい値超過フレームも1枚含めて停止
-        self.stack_method = "sum"  # sum / lighten / darken / median / sigma（sum以外は最新Max Frames枚を使う）
+        self.stack_method = "sum"  # sum / lighten / darken / median / sigma / sigmasum（sum以外は最新Max Frames枚を使う）
         self.clip_sigma = 2.5  # sigma方式の棄却しきい値（標準偏差の倍数）
         self.reset()
         self.buffer = [None] * max_frames  # Noneで初期化
@@ -668,7 +668,10 @@ class LiveStack:
             yield self._warp_bayer(past_f32, dx, dy) if self.align_enabled else past_f32
 
     def _reduce_frames(self, frames, method):
-        """frames: (n, h, w) float32。画素ごとに中央値またはシグマクリップ平均を求める（行ブロックごとに処理）。"""
+        """frames: (n, h, w) float32。画素ごとに中央値またはシグマクリップ平均を求める（行ブロックごとに処理）。
+
+        sigmasum は、棄却後の平均にフレーム数nを掛けて加算と同じスケールにする（棄却した分も補正される）。
+        """
         n, h, w = frames.shape
         out = np.empty((h, w), np.float32)
         rows = max(1, 8_000_000 // max(1, w * n))
@@ -688,11 +691,11 @@ class LiveStack:
                         cnt = keep.sum(axis=0)
                         mean = np.where(cnt > 0, (block * keep).sum(axis=0) / np.maximum(cnt, 1), mean)
                         std = np.sqrt((((block - mean) ** 2) * keep).sum(axis=0) / np.maximum(cnt, 1))
-                out[r0:r1] = mean
+                out[r0:r1] = mean * n if method == "sigmasum" else mean
         return out
 
     def _process_window(self, bayer_code, stretch, latest_index, latest_f32, latest_frame_id):
-        """sum以外の方式: 最新Max Frames枚（位置合わせ後）から比較明/比較暗/中央値/シグマクリップ平均を求める。"""
+        """sum以外の方式: 最新Max Frames枚（位置合わせ後）から比較明/比較暗/中央値/シグマクリップ平均/シグマクリップ加算を求める。"""
         method = self.stack_method
         count = 1
         if method in ("lighten", "darken"):
@@ -726,7 +729,7 @@ class LiveStack:
         self.last_overflow_ratio = 0.0
         self.last_processed_frame_id = latest_frame_id
 
-        if stretch:
+        if stretch and method != "sigmasum":  # sigmasumは加算と同じスケールなので固定スケールで表示
             return raw16_to_bgr8_stretched(np.clip(stacked, 0, 65535).astype(np.uint16), bayer_code)[0]
         scale = float(1 << max(0, self.bits - 8))
         bayer8 = np.clip(stacked / scale, 0, 255).astype(np.uint8)
@@ -2238,7 +2241,7 @@ def build_arg_parser():
     parser.add_argument("--align-size", type=int, default=50,
                         help="位置合わせ検出窓の大きさ 画像幅/高さに対する%% (10−100、デフォルト: 50)")
     parser.add_argument("--stack-method", type=str, default="sum", choices=list(STACK_METHOD_LABELS.keys()),
-                        help="スタック方式 (デフォルト: sum)。sum=加算(飽和で停止)。lighten=比較明 / darken=比較暗 / median=中央値 / sigma=シグマクリップ平均 は最新 --max-frames 枚を使う。メニューの Stack Method でも切替可")
+                        help="スタック方式 (デフォルト: sum)。sum=加算(飽和で停止)。lighten=比較明 / darken=比較暗 / median=中央値 / sigma=シグマクリップ平均 / sigmasum=シグマクリップ加算(平均×枚数) は最新 --max-frames 枚を使う。メニューの Stack Method でも切替可")
     parser.add_argument("--clip-sigma", type=float, default=2.5, help="--stack-method sigma の棄却しきい値(標準偏差の倍数, デフォルト: 2.5)")
     parser.add_argument("--no-align", action="store_true", help="位置合わせを無効化して単純加算 ([A]キー/メニューで切替可)")
     parser.add_argument("--no-dark-sub", action="store_true", help="ダーク減算とホットピクセル補間を無効化 ([E]キー/メニューで切替可)")

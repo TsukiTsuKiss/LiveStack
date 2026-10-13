@@ -119,7 +119,7 @@ class SettingsMenu:
             {
                 "name": "Stack Method",
                 "value": "Sum",
-                "values": ["Sum", "Lighten", "Darken", "Median", "Sigma Clip"]
+                "values": ["Sum", "Lighten", "Darken", "Median", "Sigma Clip", "Sigma Sum"]
             },
             {
                 "name": "Stack Mode",
