@@ -211,6 +211,37 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - `--rpicam-cmd <cmd>`: Pi側で実行するコマンド（`--listen -o tcp://...` は自動補完）
 - `--no-ssh`: JSONに `ssh_host` が設定されていても手動起動モードで接続
 
+**SSH連携のセットアップ（初回のみ）:**
+接続は鍵認証のみです（パスワード認証は使えません）。パスワードで手入力のSSHができても、鍵を作って登録するまではこのアプリから接続できません。
+
+1. PCで鍵を作る（パスフレーズは空。アプリから自動で使うため）:
+   ```bash
+   ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
+   ```
+2. 公開鍵をPiに登録する（パスワードを1回聞かれる）:
+   ```bash
+   ssh-copy-id -i ~/.ssh/id_ed25519.pub <ユーザー名>@<PiのIP>
+   ```
+3. パスワードなしで入れることを確認する:
+   ```bash
+   ssh <ユーザー名>@<PiのIP> echo ok
+   ```
+4. JSON（またはオプション）に設定する:
+   ```json
+   "ssh_host": "192.168.1.14",
+   "ssh_user": "<ユーザー名>",
+   "ssh_key": "~/.ssh/id_ed25519",
+   "rpicam_cmd": "rpicam-raw --width 3840 --height 2160 --framerate 0.3 -t 0 --shutter 5000000 --gain 0 --nopreview"
+   ```
+5. `python raw_live_stack.py --config` で起動する（`--source` は `ssh_host` から自動設定される）。
+
+**つまずきやすい点:**
+- `ssh_key` には**秘密鍵**（`.pub` の付かないファイル）を指定する。`~/.ssh/known_hosts` は接続先の記録で鍵ではないため、`not a valid OPENSSH private key file` になる。
+- `ssh_host` が `null` のままだと、`rpicam_cmd` があってもSSHは使われず、手動起動済みのrpicam-rawへ接続しに行く。起動していなければ `Connection refused` になる。`[SSH]` の行が出ているかで見分けられる。
+- 手動でrpicam-rawを起動した場合は `--no-ssh` を付ける。
+- 起動に失敗したときはPi側の `/tmp/rpicam_raw.log` にrpicam-rawの出力が残る。
+- 鍵ファイルの中身（秘密鍵）は公開しない。リポジトリには入れない（`~/.ssh` はリポジトリの外）。`ssh_key` のパス文字列だけなら公開して問題ない。
+
 **ズームフォーカスアシストオプション（CLIまたはJSONで指定）:**
 - `--zoom-pip-size <px>`: PiP表示サイズ（デフォルト: `640`）
 - `--zoom-click-size <px>`: クリック時に切り出す元解像度ピクセル数（デフォルト: `128`、倍率 = pip_size ÷ click_size）
@@ -435,6 +466,9 @@ pip install -r requirements.txt
 ```
 
 ## 変更履歴
+
+#### 2026/10/14 SSH連携のセットアップ手順を追記
+- 鍵の作成・Piへの登録・確認・設定の手順と、つまずきやすい点（`ssh_key` に `known_hosts` を指定、`ssh_host` が `null`、`--no-ssh`）を「SSH連携のセットアップ」に追記。
 
 #### 2026/10/13 デモ動画の自動生成
 - **`demo/make_demo.py` 追加**: SERファイルを再生しながらキー操作を自動入力し、画面録画（`[y]`）でシーン別のデモAVI（`--mp4` でH.264も）を作る。メニュー操作はキャプション付きで映る。
