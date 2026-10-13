@@ -82,6 +82,7 @@ from raw_utils import (
     compute_wb_gains_from_patch,
     decode_to_raw16,
     estimate_max_frames_limit,
+    get_available_memory_bytes,
     min_stride_for_bits,
     normalize_effective_raw16,
     parse_tcp_source,
@@ -95,6 +96,9 @@ from raw_utils import (
 
 PREVIEW_WINDOW_NAME = "RAW Live Stack"
 WB_WINDOW_NAME = "RAW Stack WB"
+# スタック方式: 内部名 <-> メニュー表示名
+STACK_METHOD_LABELS = {"sum": "Sum", "lighten": "Lighten", "darken": "Darken", "median": "Median", "sigma": "Sigma Clip"}
+STACK_LABEL_TO_METHOD = {v: k for k, v in STACK_METHOD_LABELS.items()}
 ZOOM_WINDOW_NAME = "RAW Live Stack - Zoom"
 
 
@@ -230,6 +234,8 @@ class LiveStack:
         self.overflow_ratio_threshold = 0.10  # 打ち切り比率（例: 0.10 = 10%）
         self.brightness_threshold = (1 << bits) - 1  # 打ち切り輝度しきい値（ネイティブビット深度で表現）
         self.include_overflow_frame = False  # True: しきい値超過フレームも1枚含めて停止
+        self.stack_method = "sum"  # sum / lighten / darken / median / sigma（sum以外は最新Max Frames枚を使う）
+        self.clip_sigma = 2.5  # sigma方式の棄却しきい値（標準偏差の倍数）
         self.reset()
         self.buffer = [None] * max_frames  # Noneで初期化
         self.buffer_frame_ids = [None] * max_frames  # 各バッファ要素に対応するフレーム番号
@@ -553,8 +559,11 @@ class LiveStack:
                 out[oy::2, ox::2] = cv2.warpAffine(plane, M, (plane.shape[1], plane.shape[0]), flags=cv2.INTER_LINEAR)
         return out
 
-    def process_stack(self, bayer_code):
-        """スタック処理を実行（バッファはraw16 uint16 Bayerで保持）"""
+    def process_stack(self, bayer_code, stretch=False):
+        """スタック処理を実行（バッファはraw16 uint16 Bayerで保持）。
+
+        stretch: sum以外の方式で、結果を自動ストレッチして8bit化する（単一フレーム相当の明るさになるため）。
+        """
         latest_index = (self.buffer_index - 1 + self.max_frames) % self.max_frames
         if self.buffer[latest_index] is None:
             print("リングバッファが空です。スタック処理をスキップします。")
@@ -568,6 +577,9 @@ class LiveStack:
         if self.dark_frame is not None and self.dark_enabled:
             latest_f32 = np.clip(latest_f32 - self.dark_frame, 0, None)
             self._fix_hot(latest_f32)
+
+        if self.stack_method != "sum":
+            return self._process_window(bayer_code, stretch, latest_index, latest_f32, latest_frame_id)
 
         stacked = latest_f32.copy()  # float32 raw16 Bayerの累積スタック
 
@@ -635,6 +647,88 @@ class LiveStack:
 
         # 表示用: 加算値を固定スケール(bits→8bit)でそのまま変換
         # 1枚: 100ADU → 100/16 = 6  /  10枚加算: 1000ADU → 1000/16 = 62  → ヒストグラムが右シフト
+        bayer8 = np.clip(stacked / scale, 0, 255).astype(np.uint8)
+        return cv2.cvtColor(bayer8, bayer_code)
+
+    def _iter_aligned(self, latest_index):
+        """最新フレームを基準に位置合わせした過去フレームを、新しい順に返す（最新フレーム自身は含まない）。"""
+        latest_pos = self.buffer_pos[latest_index] or (0.0, 0.0)
+        for i in range(self.max_frames - 1):
+            past_index = (self.buffer_index - 2 - i + self.max_frames) % self.max_frames
+            past_raw16 = self.buffer[past_index]
+            if past_raw16 is None:
+                return
+            past_f32 = past_raw16.astype(np.float32)
+            if self.dark_frame is not None and self.dark_enabled:
+                past_f32 = np.clip(past_f32 - self.dark_frame, 0, None)
+                self._fix_hot(past_f32)
+            past_pos = self.buffer_pos[past_index] or latest_pos
+            dx = latest_pos[0] - past_pos[0]
+            dy = latest_pos[1] - past_pos[1]
+            yield self._warp_bayer(past_f32, dx, dy) if self.align_enabled else past_f32
+
+    def _reduce_frames(self, frames, method):
+        """frames: (n, h, w) float32。画素ごとに中央値またはシグマクリップ平均を求める（行ブロックごとに処理）。"""
+        n, h, w = frames.shape
+        out = np.empty((h, w), np.float32)
+        rows = max(1, 8_000_000 // max(1, w * n))
+        for r0 in range(0, h, rows):
+            r1 = min(h, r0 + rows)
+            block = frames[:, r0:r1]
+            if method == "median":
+                # 画素ごとに連続配置してから中央値を取る方が速い
+                flat = np.ascontiguousarray(block.reshape(n, -1).T)
+                out[r0:r1] = np.median(flat, axis=1).reshape(r1 - r0, w)
+            else:
+                mean = block.mean(axis=0)
+                if n >= 3:
+                    std = block.std(axis=0)
+                    for _ in range(2):
+                        keep = np.abs(block - mean) <= self.clip_sigma * std
+                        cnt = keep.sum(axis=0)
+                        mean = np.where(cnt > 0, (block * keep).sum(axis=0) / np.maximum(cnt, 1), mean)
+                        std = np.sqrt((((block - mean) ** 2) * keep).sum(axis=0) / np.maximum(cnt, 1))
+                out[r0:r1] = mean
+        return out
+
+    def _process_window(self, bayer_code, stretch, latest_index, latest_f32, latest_frame_id):
+        """sum以外の方式: 最新Max Frames枚（位置合わせ後）から比較明/比較暗/中央値/シグマクリップ平均を求める。"""
+        method = self.stack_method
+        count = 1
+        if method in ("lighten", "darken"):
+            op = np.maximum if method == "lighten" else np.minimum
+            stacked = latest_f32.copy()
+            for aligned in self._iter_aligned(latest_index):
+                op(stacked, aligned, out=stacked)
+                count += 1
+        else:
+            h, w = latest_f32.shape[:2]
+            available = sum(1 for b in self.buffer if b is not None)
+            n = min(available, self.max_frames)
+            mem = get_available_memory_bytes()
+            if mem is not None:
+                n_mem = max(1, int(mem * 0.4 // (h * w * 4)))
+                if n_mem < n:
+                    print(f"[warn] {method}: メモリ不足のため使用枚数を {n} から {n_mem} に制限します")
+                    n = n_mem
+            frames = np.empty((n, h, w), np.float32)
+            frames[0] = latest_f32
+            for aligned in self._iter_aligned(latest_index):
+                if count >= n:
+                    break
+                frames[count] = aligned
+                count += 1
+            stacked = self._reduce_frames(frames[:count], method)
+
+        self.stack_count = count
+        self.stacked_raw16 = stacked
+        self.last_stop_reason = f"window-{method}"
+        self.last_overflow_ratio = 0.0
+        self.last_processed_frame_id = latest_frame_id
+
+        if stretch:
+            return raw16_to_bgr8_stretched(np.clip(stacked, 0, 65535).astype(np.uint16), bayer_code)[0]
+        scale = float(1 << max(0, self.bits - 8))
         bayer8 = np.clip(stacked / scale, 0, 255).astype(np.uint8)
         return cv2.cvtColor(bayer8, bayer_code)
 
@@ -1090,6 +1184,8 @@ def run_raw_live_stack(args):
         live_stack.align_ratio = max(0.1, min(1.0, args.align_size / 100.0))
         live_stack.align_enabled = not args.no_align
         live_stack.dark_enabled = not args.no_dark_sub
+        live_stack.stack_method = args.stack_method
+        live_stack.clip_sigma = args.clip_sigma
 
         settings_menu = SettingsMenu()
         control_menu = ControlMenu([
@@ -1108,7 +1204,7 @@ def run_raw_live_stack(args):
             ("Dark Clear", "D", None),
             ("Save Config JSON", "C", None),
         ])
-        stream_menu_names = {"Max Frames", "Stack Mode", "Info Display", "Histogram", "Flip H", "Flip V", "SER Flip", "Stop Threshold", "Stop Ratio(%)", "Align Size(%)", "Align", "Dark Sub"}
+        stream_menu_names = {"Max Frames", "Stack Mode", "Info Display", "Histogram", "Flip H", "Flip V", "SER Flip", "Stack Method", "Stop Threshold", "Stop Ratio(%)", "Align Size(%)", "Align", "Dark Sub"}
         # Stop Threshold の範囲をビット深度に合わせて更新
         max_val = (1 << effective_bits) - 1
         for _s in settings_menu.settings:
@@ -1129,6 +1225,7 @@ def run_raw_live_stack(args):
             exposure=16667,
             max_frames=max_frames,
             stack_mode=False,
+            stack_method=STACK_METHOD_LABELS[live_stack.stack_method],
             info_display=True,
             hist_display=show_hist,
             flip_h=args.flip_h,
@@ -1313,7 +1410,7 @@ def run_raw_live_stack(args):
 
                 _t0 = time.perf_counter()
                 try:
-                    result = live_stack.process_stack(bayer_code)
+                    result = live_stack.process_stack(bayer_code, stretch=auto_stretch)
                 except Exception as e:
                     print(f"[stack worker error] {e}")
                     result = None
@@ -1451,7 +1548,7 @@ def run_raw_live_stack(args):
                     f"{args.source}",
                     f"{src_w}x{src_h}  frame#{frame_count}"
                     + (f"  SER {ser_reader.position}/{ser_reader.frame_count}{'  PAUSE' if ser_paused else ''}{'' if ser_loop else '  no-loop'}" if ser_reader is not None else ""),
-                    f"{fmt['name'].strip()} | Bayer:{bayer_name} | {stretch_label} | Stack:{'ON' if stack_enabled else 'OFF'}",
+                    f"{fmt['name'].strip()} | Bayer:{bayer_name} | {stretch_label} | Stack:{STACK_METHOD_LABELS[live_stack.stack_method] if stack_enabled else 'OFF'}",
                 ]
                 if args.wire_format in ("12u", "10u", "16u"):
                     lines.append(
@@ -1647,6 +1744,11 @@ def run_raw_live_stack(args):
                     if values["max_frames"] != live_stack.max_frames:
                         live_stack.resize_max_frames(values["max_frames"])
                         print(f"Max Frames設定: {live_stack.max_frames}")
+                    new_method = STACK_LABEL_TO_METHOD.get(values["stack_method"], "sum")
+                    if new_method != live_stack.stack_method:
+                        live_stack.stack_method = new_method
+                        _last_worker_frame_id[0] = None  # バッファは残したまま、次の更新で再計算する
+                        print(f"[stack] 方式: {STACK_METHOD_LABELS[new_method]}")
                     if values["stack_mode"] != stack_enabled:
                         stack_enabled = values["stack_mode"]
                         if stack_enabled:
@@ -1724,6 +1826,7 @@ def run_raw_live_stack(args):
                         exposure=16667,
                         max_frames=live_stack.max_frames,
                         stack_mode=stack_enabled,
+                        stack_method=STACK_METHOD_LABELS[live_stack.stack_method],
                         info_display=info_display,
                         hist_display=show_hist,
                         flip_h=flip_h,
@@ -1896,7 +1999,7 @@ def run_raw_live_stack(args):
                     elif flip_v:
                         bgr16 = cv2.flip(bgr16, 0)
                     save_fits(bgr16, fname, metadata)
-                    print(f"[save] FITS (uint16 BGR stacked sum, {live_stack.stack_count}frm): {fname}")
+                    print(f"[save] FITS (uint16 BGR stacked {live_stack.stack_method}, {live_stack.stack_count}frm): {fname}")
                 else:
                     save_fits(save_frame, fname, metadata)
             elif key == ord("a"):
@@ -1973,6 +2076,7 @@ def run_raw_live_stack(args):
                 args.stop_ratio = round(live_stack.overflow_ratio_threshold * 100.0, 1)
                 args.align_size = int(round(live_stack.align_ratio * 100))
                 args.no_align = not live_stack.align_enabled
+                args.stack_method = live_stack.stack_method
                 args.no_dark_sub = not live_stack.dark_enabled
                 args.wb_b = round(float(wb_gains[0]), 3)
                 args.wb_g = round(float(wb_gains[1]), 3)
@@ -2133,6 +2237,9 @@ def build_arg_parser():
                         help="スタック打ち切り比率%% (1−50、未指定=10.0)")
     parser.add_argument("--align-size", type=int, default=50,
                         help="位置合わせ検出窓の大きさ 画像幅/高さに対する%% (10−100、デフォルト: 50)")
+    parser.add_argument("--stack-method", type=str, default="sum", choices=list(STACK_METHOD_LABELS.keys()),
+                        help="スタック方式 (デフォルト: sum)。sum=加算(飽和で停止)。lighten=比較明 / darken=比較暗 / median=中央値 / sigma=シグマクリップ平均 は最新 --max-frames 枚を使う。メニューの Stack Method でも切替可")
+    parser.add_argument("--clip-sigma", type=float, default=2.5, help="--stack-method sigma の棄却しきい値(標準偏差の倍数, デフォルト: 2.5)")
     parser.add_argument("--no-align", action="store_true", help="位置合わせを無効化して単純加算 ([A]キー/メニューで切替可)")
     parser.add_argument("--no-dark-sub", action="store_true", help="ダーク減算とホットピクセル補間を無効化 ([E]キー/メニューで切替可)")
     parser.add_argument("--wb-b", type=float, default=None, help="初期WBゲイン B (デフォルト: 1.0)")

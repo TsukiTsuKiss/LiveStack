@@ -117,6 +117,11 @@ class SettingsMenu:
                 "value": True
             },
             {
+                "name": "Stack Method",
+                "value": "Sum",
+                "values": ["Sum", "Lighten", "Darken", "Median", "Sigma Clip"]
+            },
+            {
                 "name": "Stack Mode",
                 "value": False
             }
@@ -175,7 +180,7 @@ class SettingsMenu:
         """設定値を変更"""
         setting = self.settings[self.selected_item]
 
-        if setting["name"] == "Camera":
+        if setting["name"] in ("Camera", "Stack Method"):
             values = setting["values"]
             try:
                 current_index = values.index(setting["value"])
@@ -298,6 +303,7 @@ class SettingsMenu:
             "exposure": values_by_name.get("Exposure", 16667),
             "max_frames": int(values_by_name.get("Max Frames", 100)),
             "stack_mode": bool(values_by_name.get("Stack Mode", False)),
+            "stack_method": values_by_name.get("Stack Method", "Sum"),
             "info_display": bool(values_by_name.get("Info Display", True)),
             "hist_display": bool(values_by_name.get("Histogram", True)),
             "flip_h": bool(values_by_name.get("Flip H", False)),
@@ -310,7 +316,7 @@ class SettingsMenu:
             "dark_enabled": bool(values_by_name.get("Dark Sub", True)),
         }
 
-    def set_current_values(self, camera=0, gain=2.0, exposure=16667, max_frames=100, stack_mode=False, info_display=True, hist_display=True, flip_h=False, flip_v=False, ser_flip=False, size_label="N/A", stop_ratio_percent=10, stop_threshold=255, align_size_percent=50, align_enabled=True, dark_enabled=True):
+    def set_current_values(self, camera=0, gain=2.0, exposure=16667, max_frames=100, stack_mode=False, info_display=True, hist_display=True, flip_h=False, flip_v=False, ser_flip=False, stack_method="Sum", size_label="N/A", stop_ratio_percent=10, stop_threshold=255, align_size_percent=50, align_enabled=True, dark_enabled=True):
         """現在の設定値を更新（キーワード指定で呼ぶこと）"""
         values = {
             "Camera": camera,
@@ -319,6 +325,7 @@ class SettingsMenu:
             "Exposure": exposure,
             "Max Frames": max_frames,
             "Stack Mode": stack_mode,
+            "Stack Method": stack_method,
             "Info Display": info_display,
             "Histogram": bool(hist_display),
             "Flip H": bool(flip_h),
