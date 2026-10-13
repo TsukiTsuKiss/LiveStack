@@ -716,17 +716,37 @@ class LiveStack:
                     n = n_mem
             frames = np.empty((n, h, w), np.float32)
             frames[0] = latest_f32
+            stop_reason = f"window-{method}"
+            last_ratio = 0.0
+            # sigmasum は加算(sum)と同じ停止条件で枚数を決める（単純加算が飽和判定に達する手前まで）
+            acc = latest_f32.copy() if method == "sigmasum" else None
+            max_native = float((1 << self.bits) - 1)
             for aligned in self._iter_aligned(latest_index):
                 if count >= n:
                     break
+                if acc is not None:
+                    test = acc + aligned
+                    last_ratio = float(np.mean(np.clip(test, 0.0, max_native) >= float(self.brightness_threshold)))
+                    if last_ratio >= self.overflow_ratio_threshold:
+                        if self.include_overflow_frame:
+                            frames[count] = aligned
+                            count += 1
+                            stop_reason = "ratio-stop-included"
+                        else:
+                            stop_reason = "ratio-stop"
+                        break
+                    acc = test
                 frames[count] = aligned
                 count += 1
             stacked = self._reduce_frames(frames[:count], method)
+            self.last_overflow_ratio = last_ratio
+            self.last_stop_reason = stop_reason
 
         self.stack_count = count
         self.stacked_raw16 = stacked
-        self.last_stop_reason = f"window-{method}"
-        self.last_overflow_ratio = 0.0
+        if method in ("lighten", "darken"):
+            self.last_stop_reason = f"window-{method}"
+            self.last_overflow_ratio = 0.0
         self.last_processed_frame_id = latest_frame_id
 
         if stretch and method != "sigmasum":  # sigmasumは加算と同じスケールなので固定スケールで表示

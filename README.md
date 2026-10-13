@@ -248,7 +248,7 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - **Stop Ratio(%)**: 1～50（1刻み） - 停止条件となる割合
 - **Align Size(%)**: 10～100（10刻み） - 位置合わせ検出窓の大きさ（画像幅/高さに対する割合、デフォルト 50）。`raw_live_stack.py` のみ適用
 - **Align**: ON/OFF - 位置合わせの有効/無効（`[A]`キーでも切替、`--no-align` で無効起動）。切替時にスタックをリセット。`raw_live_stack.py` のみ適用
-- **Stack Method**: Sum / Lighten / Darken / Median / Sigma Clip - スタック方式（`--stack-method` で起動時指定）。`Sum` は加算（飽和で自動停止）。それ以外は最新 `Max Frames` 枚（位置合わせ後）から画素ごとに計算する。`Lighten`=比較明（星の軌跡・流星・衛星。位置合わせOFF推奨）、`Darken`=比較暗（衛星・飛行機の筋の除去）、`Median`=中央値、`Sigma Clip`=シグマクリップ平均（外れ値除去しつつノイズ低減、`--clip-sigma` で棄却幅）、`Sigma Sum`=シグマクリップ加算（棄却後の平均×枚数。加算と同じスケールで、保存時の精度とダイナミックレンジが保たれる。16bitを超える分は飽和）。シグマクリップは枚数が少ないと外れ値を除けない（1つの外れ値の最大偏差は (N-1)/√N σ のため、棄却幅2.5ではN≥9、2.0ではN≥6が目安）。少ない枚数では `--clip-sigma` を小さくする。Sum以外では `Stop Threshold`/`Stop Ratio(%)` は使われない。切替時もバッファは保持され、次の更新で再計算される。`raw_live_stack.py` のみ
+- **Stack Method**: Sum / Lighten / Darken / Median / Sigma Clip - スタック方式（`--stack-method` で起動時指定）。`Sum` は加算（飽和で自動停止）。それ以外は最新 `Max Frames` 枚（位置合わせ後）から画素ごとに計算する。`Lighten`=比較明（星の軌跡・流星・衛星。位置合わせOFF推奨）、`Darken`=比較暗（衛星・飛行機の筋の除去）、`Median`=中央値、`Sigma Clip`=シグマクリップ平均（外れ値除去しつつノイズ低減、`--clip-sigma` で棄却幅）、`Sigma Sum`=シグマクリップ加算（棄却後の平均×枚数。加算と同じスケールで、保存時の精度とダイナミックレンジが保たれる。16bitを超える分は飽和）。`Sigma Sum` は `Sum` と同じ停止条件（`Stop Threshold`/`Stop Ratio(%)`）で枚数を決める。シグマクリップは枚数が少ないと外れ値を除けない（1つの外れ値の最大偏差は (N-1)/√N σ のため、棄却幅2.5ではN≥9、2.0ではN≥6が目安）。少ない枚数では `--clip-sigma` を小さくする。`Sum` と `Sigma Sum` 以外では `Stop Threshold`/`Stop Ratio(%)` は使われない。切替時もバッファは保持され、次の更新で再計算される。`raw_live_stack.py` のみ
 - **Dark Sub**: ON/OFF - ダーク減算とホットピクセル補間の有効/無効（`[E]`キーでも切替、`--no-dark-sub` で無効起動）。ダーク減算済みのSERを入力する場合などに使用。切替時にスタックをリセット。`raw_live_stack.py` のみ適用
 
 **操作方法:**
