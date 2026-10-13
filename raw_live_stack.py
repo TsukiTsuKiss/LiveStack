@@ -1364,7 +1364,8 @@ def run_raw_live_stack(args):
             print("       [space]一時停止/再生  [,][.]コマ戻し/送り  [[][]]先頭/末尾へ  [l]ループ切替")
 
         frame_count = 0
-        last_raw16 = None
+        last_raw16 = None      # 受信した生フレーム（ダーク取得・NPY・SER録画に使う。ダーク減算しない）
+        last_view16 = None     # 表示・統計用（スタックOFFかつDark Sub ONならダーク減算後）
         save_frame = None
         prev_frame_t = time.perf_counter()
 
@@ -1461,17 +1462,26 @@ def run_raw_live_stack(args):
                     raw16 = raw16[crop_y:crop_y + args.height, crop_x:crop_x + args.width]
                 raw16 = normalize_effective_raw16(raw16, fmt["bits"], effective_bits, effective_shift)
 
+                # スタックOFFでもDark Sub ONならダーク減算後の映像を表示する（スタックONはスタック側で減算する）
+                view16 = raw16
+                dark = live_stack.dark_frame
+                if not stack_enabled and dark is not None and live_stack.dark_enabled and dark.shape == raw16.shape:
+                    sub = np.clip(raw16.astype(np.float32) - dark, 0, None)
+                    live_stack._fix_hot(sub)
+                    view16 = np.clip(sub, 0, 65535).astype(np.uint16)
+
                 # スタック用: ストレッチなし・生のデベイヤ画像
-                bgr = raw16_to_bgr8(raw16, effective_bits, bayer_code)
+                bgr = raw16_to_bgr8(view16, effective_bits, bayer_code)
 
                 # 表示用: ストレッチあり or なし
                 if auto_stretch:
-                    bgr_disp, s_lo, s_hi = raw16_to_bgr8_stretched(raw16, bayer_code)
+                    bgr_disp, s_lo, s_hi = raw16_to_bgr8_stretched(view16, bayer_code)
                 else:
                     bgr_disp = bgr.copy()
                     s_lo, s_hi = 0.0, float((1 << effective_bits) - 1)
 
                 last_raw16 = raw16
+                last_view16 = view16
                 if _frame_fresh:
                     frame_count += 1
                     now_t = time.perf_counter()
@@ -1580,10 +1590,12 @@ def run_raw_live_stack(args):
                 lines.append(
                     f"WB B:{wb_gains[0]:.2f} G:{wb_gains[1]:.2f} R:{wb_gains[2]:.2f} | Gamma:{gamma_value:.2f} | click:{'ON' if click_wb_mode else 'OFF'}"
                 )
-                if last_raw16 is not None:
-                    vmin = int(last_raw16.min())
-                    vmax = int(last_raw16.max())
-                    vmean = float(last_raw16.mean())
+                if live_stack.dark_frame is not None:
+                    lines.append(f"Dark: {'ON' if live_stack.dark_enabled else 'OFF'} ({len(live_stack.dark_buffer) or '読込'}枚)")
+                if last_view16 is not None:
+                    vmin = int(last_view16.min())
+                    vmax = int(last_view16.max())
+                    vmean = float(last_view16.mean())
                     lines.append(f"min={vmin}  max={vmax}  mean={vmean:.1f}  (max={(1 << effective_bits) - 1})")
                     if auto_stretch:
                         lines.append(f"stretch[{s_lo:.0f} - {s_hi:.0f}]")
@@ -1595,9 +1607,9 @@ def run_raw_live_stack(args):
                             native_stats,
                             live_stack.brightness_threshold,
                         )
-                    elif last_raw16 is not None:
+                    elif last_view16 is not None:
                         current_ratio = compute_white_ratio_native(
-                            last_raw16,
+                            last_view16,
                             live_stack.brightness_threshold,
                         )
                     else:
@@ -1642,7 +1654,7 @@ def run_raw_live_stack(args):
                 else:
                     # Stack OFF: 単フレームraw16で真の12bitヒストグラム＋stretchマーカー表示
                     # 1/4サブサンプリング（統計的な精度は十分）
-                    hist_native = last_raw16[::4, ::4].astype(np.float32) if last_raw16 is not None else None
+                    hist_native = last_view16[::4, ::4].astype(np.float32) if last_view16 is not None else None
                     preview_frame = draw_ccdf_overlay(
                         preview_frame,
                         save_frame,
