@@ -12,6 +12,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'common'))
 
 from hist_overlay import draw_hist_ccdf_overlay
 from display_utils import clamp, decode_key, draw_info_lines, fit_display_frame, get_screen_size
+from ui_menus import ControlMenu, ScreenRecorder, SettingsMenu, route_control_key, toggle_settings_menu
 import cv2
 import numpy as np
 import time
@@ -334,289 +335,6 @@ class LiveStack:
         self.dark_frame = (dark_sum / len(self.dark_buffer)).astype(np.uint8)
         print(f"ダークフレームを更新しました。現在の平均化フレーム数: {len(self.dark_buffer)}")
 
-class SettingsMenu:
-    """設定メニュークラス"""
-    
-    def __init__(self):
-        self.apply_requested = False
-        self.settings = [
-            {
-                "name": "Camera", 
-                "value": 0,  # カメラ番号
-                "values": [0, 1]  # 利用可能なカメラ番号
-            },
-            {
-                "name": "Size",
-                "value": "N/A",
-                "values": ["N/A"]
-            },
-            {
-                "name": "Gain", 
-                "value": 2.0, 
-                "min": 1.0, 
-                "max": 8.0, 
-                "step": 0.5
-            },
-            {
-                "name": "Exposure", 
-                "value": 16667,  # 1/60秒
-                "values": [
-                    # 長時間露出（天体撮影向け）
-                    10000000,  # 10秒
-                    5000000,   # 5秒
-                    2000000,   # 2秒
-                    1000000,   # 1秒
-                    500000,    # 1/2秒
-                    250000,    # 1/4秒
-                    125000,    # 1/8秒
-                    62500,     # 1/16秒
-                    33333,     # 1/30秒
-                    16667,     # 1/60秒
-                    8000,      # 1/125秒
-                    4000,      # 1/250秒
-                    2000,      # 1/500秒
-                    1000,      # 1/1000秒
-                    500        # 1/2000秒
-                ]
-            },
-            {
-                "name": "Max Frames", 
-                "value": 100, 
-                "min": 1, 
-                "max": 100, 
-                "step": 1
-            },
-            {
-                "name": "Stack Mode", 
-                "value": False
-            },
-            {
-                "name": "Info Display", 
-                "value": True
-            },
-            {
-                "name": "Stop Threshold",
-                "value": 255,
-                "min": 5,
-                "max": 255,
-                "step": 5
-            },
-            {
-                "name": "Stop Ratio(%)",
-                "value": 10,
-                "min": 1,
-                "max": 50,
-                "step": 1
-            }
-        ]
-        self.selected_item = 0
-        self.menu_active = False
-    
-    def handle_key(self, key_raw):
-        """キー入力処理"""
-        if not self.menu_active:
-            return False
-
-        self.apply_requested = False
-
-        key, nav = decode_key(key_raw)
-
-        if nav == "up":
-            self.selected_item = (self.selected_item - 1) % len(self.settings)
-            return True
-        elif nav == "down":
-            self.selected_item = (self.selected_item + 1) % len(self.settings)
-            return True
-        elif nav == "left":
-            self.change_value(-1)
-            return True
-        elif nav == "right":
-            self.change_value(1)
-            return True
-        elif key in [10, 13]:  # Enter(LF/CR) - 設定適用（メニューは閉じない）
-            self.apply_requested = True
-            return True
-        elif key == 27:  # ESC - キャンセル
-            self.menu_active = False
-            return True
-        
-        return False
-    
-    def change_value(self, direction):
-        """設定値を変更"""
-        setting = self.settings[self.selected_item]
-        
-        if setting["name"] == "Camera":
-            values = setting["values"]
-            try:
-                current_index = values.index(setting["value"])
-            except ValueError:
-                current_index = 0
-            
-            new_index = (current_index + direction) % len(values)
-            setting["value"] = values[new_index]
-            
-        elif setting["name"] == "Gain":
-            new_value = setting["value"] + (direction * setting["step"])
-            setting["value"] = max(setting["min"], min(setting["max"], new_value))
-            
-        elif setting["name"] == "Exposure":
-            values = setting["values"]
-            try:
-                current_index = values.index(setting["value"])
-            except ValueError:
-                # 現在の値がリストにない場合、最も近い値を見つける
-                current_index = min(range(len(values)), key=lambda i: abs(values[i] - setting["value"]))
-            
-            new_index = max(0, min(len(values)-1, current_index + direction))
-            setting["value"] = values[new_index]
-
-        elif setting["name"] == "Size":
-            values = setting.get("values", [])
-            if not values:
-                return
-            try:
-                current_index = values.index(setting["value"])
-            except ValueError:
-                current_index = 0
-            new_index = (current_index + direction) % len(values)
-            setting["value"] = values[new_index]
-            
-        elif setting["name"] == "Max Frames":
-            new_value = setting["value"] + (direction * setting["step"])
-            setting["value"] = max(setting["min"], min(setting["max"], new_value))
-            
-        elif setting["name"] == "Stack Mode":
-            setting["value"] = not setting["value"]
-        
-        elif setting["name"] == "Info Display":
-            setting["value"] = not setting["value"]
-
-        elif setting["name"] == "Stop Ratio(%)":
-            new_value = setting["value"] + (direction * setting["step"])
-            setting["value"] = max(setting["min"], min(setting["max"], new_value))
-
-        elif setting["name"] == "Stop Threshold":
-            new_value = setting["value"] + (direction * setting["step"])
-            setting["value"] = max(setting["min"], min(setting["max"], new_value))
-    
-    def get_exposure_text(self, exposure_us):
-        """露出時間をわかりやすいテキストに変換"""
-        if exposure_us >= 1000000:  # 1秒以上
-            seconds = exposure_us / 1000000
-            if seconds == int(seconds):
-                return f"{int(seconds)}s"
-            else:
-                return f"{seconds:.1f}s"
-        else:  # 1秒未満
-            denominator = int(1000000 / exposure_us)
-            return f"1/{denominator}"
-    
-    def draw_menu(self, frame):
-        """設定メニューを描画"""
-        if not self.menu_active:
-            return frame
-        
-        # 半透明の背景（設定項目数に応じて高さを調整）
-        menu_height = 170 + len(self.settings) * 35 + 20  # タイトル部分 + 項目数 * 行高さ + 余白
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (50, 50), (600, menu_height), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
-        
-        # タイトル
-        cv2.putText(frame, "Settings Menu", (60, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-        cv2.putText(frame, "Up/Down: Select Item  Left/Right: Change Value", 
-                   (60, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-        cv2.putText(frame, "Enter: Apply  ESC: Cancel", 
-                   (60, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-        
-        # 設定項目を表示
-        for i, setting in enumerate(self.settings):
-            y_pos = 170 + i * 35
-            color = (0, 255, 0) if i == self.selected_item else (255, 255, 255)
-            
-            # 値のテキスト生成
-            if setting["name"] == "Camera":
-                value_text = f"{setting['value']}"
-            elif setting["name"] == "Exposure":
-                value_text = self.get_exposure_text(setting["value"])
-            elif setting["name"] == "Size":
-                value_text = setting["value"]
-            elif setting["name"] == "Stack Mode":
-                value_text = "ON" if setting["value"] else "OFF"
-            elif setting["name"] == "Info Display":
-                value_text = "ON" if setting["value"] else "OFF"
-            elif setting["name"] == "Stop Ratio(%)":
-                value_text = f"{int(setting['value'])}%"
-            elif setting["name"] == "Stop Threshold":
-                value_text = f"{int(setting['value'])}"
-            elif setting["name"] == "Gain":
-                value_text = f"{setting['value']:.1f}"
-            else:
-                value_text = str(setting["value"])
-            
-            text = f"{setting['name']}: {value_text}"
-            cv2.putText(frame, text, (80, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-            
-            # 選択中の項目にカーソル表示
-            if i == self.selected_item:
-                cv2.putText(frame, ">", (55, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        
-        return frame
-    
-    def get_current_values(self):
-        """現在の設定値を辞書で返す"""
-        values_by_name = {s.get("name"): s.get("value") for s in self.settings}
-        return {
-            "camera": values_by_name.get("Camera", 0),
-            "size_label": values_by_name.get("Size", "N/A"),
-            "gain": values_by_name.get("Gain", 2.0),
-            "exposure": values_by_name.get("Exposure", 16667),
-            "max_frames": int(values_by_name.get("Max Frames", 100)),
-            "stack_mode": bool(values_by_name.get("Stack Mode", False)),
-            "info_display": bool(values_by_name.get("Info Display", True)),
-            "stop_threshold": int(values_by_name.get("Stop Threshold", 255)),
-            "stop_ratio_percent": int(values_by_name.get("Stop Ratio(%)", 10)),
-        }
-    
-    def set_current_values(self, camera, gain, exposure, max_frames, stack_mode, info_display=True, size_label="N/A", stop_ratio_percent=10, stop_threshold=255):
-        """現在の設定値を更新"""
-        values = {
-            "Camera": camera,
-            "Size": size_label,
-            "Gain": gain,
-            "Exposure": exposure,
-            "Max Frames": max_frames,
-            "Stack Mode": stack_mode,
-            "Info Display": info_display,
-            "Stop Threshold": int(stop_threshold),
-            "Stop Ratio(%)": int(stop_ratio_percent),
-        }
-
-        for setting in self.settings:
-            name = setting.get("name")
-            if name not in values:
-                continue
-
-            value = values[name]
-            if name in ["Stop Threshold", "Stop Ratio(%)"] and "min" in setting and "max" in setting:
-                value = max(setting["min"], min(setting["max"], int(value)))
-
-            setting["value"] = value
-
-    def set_size_choices(self, size_labels, current_label=None):
-        """Size項目の選択肢を更新"""
-        if not size_labels:
-            self.settings[1]["values"] = ["N/A"]
-            self.settings[1]["value"] = "N/A"
-            return
-
-        self.settings[1]["values"] = size_labels
-        if current_label in size_labels:
-            self.settings[1]["value"] = current_label
-        else:
-            self.settings[1]["value"] = size_labels[0]
-
 def save_fits(image, filename, metadata):
     """FITS形式でRGB画像を保存"""
     try:
@@ -680,10 +398,248 @@ def create_camera_safely(camera_num, current_gain, current_exposure, low_light_m
         return None
 
 
+STREAM_MENU_NAMES = {
+    "Stop Threshold", "Stop Ratio(%)", "Max Frames", "Info Display", "Histogram", "Flip H", "Flip V", "Stack Mode",
+}
+CAMERA_MENU_NAMES = STREAM_MENU_NAMES | {"Camera", "Size", "Gain", "Exposure"}
+
+
+def build_control_menu(has_camera):
+    """操作メニュー([c])の項目。has_camera=True はpicamera2直結モード。"""
+    items = [
+        ("Save PNG", "s", None),
+        ("Save JPEG", "j", None),
+        ("Save FITS", "f", None),
+        ("Screen Rec (AVI)", "y", "scr"),
+        ("Stack Reset", "r", None),
+    ]
+    if has_camera:
+        items += [("Dark Capture", "d", None), ("Switch Camera", "k", None)]
+    return ControlMenu(items)
+
+
+class LiveUi:
+    """ストリームモードとpicamera2モードで共通のUI状態・描画・キー処理（raw_live_stack.pyと同じ操作感）"""
+
+    def __init__(self, args, live_stack, tag, has_camera):
+        self.live_stack = live_stack
+        self.tag = tag  # 保存ファイル名に入れる識別子（例: source / cam0）
+        self.settings_menu = SettingsMenu(names=CAMERA_MENU_NAMES if has_camera else STREAM_MENU_NAMES)
+        self.control_menu = build_control_menu(has_camera)
+        self.screen_rec = ScreenRecorder(args.screen_fps)
+        self.stacking_enabled = False
+        self.info_display = True
+        self.show_hist = True
+        self.flip_h = args.flip_h
+        self.flip_v = args.flip_v
+        self.screen_size = get_screen_size()
+        self.camera_meta = None  # カメラ使用時のみ {"exposure_us", "gain", "dark"}
+
+    def sync_settings_menu(self, **camera_values):
+        """現在の状態を設定メニューへ反映する（camera/gain/exposure/size_label はキーワードで渡す）"""
+        ls = self.live_stack
+        self.settings_menu.set_current_values(
+            max_frames=ls.max_frames,
+            stack_mode=self.stacking_enabled,
+            info_display=self.info_display,
+            hist_display=self.show_hist,
+            flip_h=self.flip_h,
+            flip_v=self.flip_v,
+            stop_ratio_percent=int(ls.overflow_ratio_threshold * 100),
+            stop_threshold=ls.brightness_threshold,
+            **camera_values,
+        )
+
+    def set_stacking(self, enabled):
+        self.stacking_enabled = enabled
+        self.settings_menu.set_value("Stack Mode", enabled)
+        if enabled:
+            print("LiveStack 有効")
+            self.live_stack.reset()
+        else:
+            print("LiveStack 無効")
+
+    def _flip(self, img):
+        if self.flip_h and self.flip_v:
+            return cv2.flip(img, -1)
+        if self.flip_h:
+            return cv2.flip(img, 1)
+        if self.flip_v:
+            return cv2.flip(img, 0)
+        return img
+
+    def build_frames(self, frame):
+        """フレームをバッファへ追加し、(保存用, 表示用) フレームを返す（スタック・反転適用済み）"""
+        self.live_stack.add_to_buffer(frame)
+        if self.stacking_enabled:
+            result = self.live_stack.process_stack()
+            if result is None:
+                result = frame
+            save_frame = result.copy()
+            display_frame = result.copy()
+        else:
+            save_frame = frame.copy()
+            display_frame = frame.copy()
+        return self._flip(save_frame), self._flip(display_frame)
+
+    def render(self, display_frame, save_frame, source_line, extra_lines=()):
+        """縮小→info・ヒストグラム・メニュー合成→画面録画 まで行いプレビューフレームを返す"""
+        ls = self.live_stack
+        preview_frame = fit_display_frame(display_frame, screen_size=self.screen_size, ratio=0.85, fallback_height=600)
+
+        if self.info_display:
+            mode_text = "Live Stack Mode" if self.stacking_enabled else "Live View Mode"
+            cv2.putText(preview_frame, mode_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            cv2.putText(preview_frame, source_line, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            if self.stacking_enabled:
+                cv2.putText(preview_frame, f"Frames: {ls.stack_count}", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                current_ratio = compute_white_ratio_uint8(save_frame, ls.brightness_threshold)
+                cv2.putText(preview_frame, f"Now: {current_ratio * 100:.2f}% / Limit: {ls.overflow_ratio_threshold * 100:.2f}%", (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
+            for i, line in enumerate(extra_lines):
+                cv2.putText(preview_frame, line, (10, 150 + i * 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            if self.show_hist:
+                preview_frame = draw_ccdf_overlay(
+                    preview_frame,
+                    save_frame,
+                    brightness_threshold=ls.brightness_threshold,
+                    stop_ratio=ls.overflow_ratio_threshold,
+                )
+
+        if self.settings_menu.menu_active:
+            preview_frame = self.settings_menu.draw_menu(preview_frame)
+        if self.control_menu.menu_active:
+            preview_frame = self.control_menu.draw_menu(preview_frame, {"scr": self.screen_rec.active})
+
+        self.screen_rec.write(preview_frame)
+        self.screen_rec.draw_indicator(preview_frame)  # 録画フレームに写らないよう書き込み後に描画
+        return preview_frame
+
+    def apply_settings(self, values):
+        """設定メニューで変更された共通項目を反映する"""
+        ls = self.live_stack
+        if values["max_frames"] != ls.max_frames:
+            ls.max_frames = values["max_frames"]
+            print(f"Max Frames設定: {ls.max_frames}")
+
+        if values["stack_mode"] != self.stacking_enabled:
+            self.set_stacking(values["stack_mode"])
+
+        if values["info_display"] != self.info_display:
+            self.info_display = values["info_display"]
+            print(f"情報表示: {'ON' if self.info_display else 'OFF'}")
+
+        if values["hist_display"] != self.show_hist:
+            self.show_hist = values["hist_display"]
+            print(f"[hist] ヒストグラム: {'ON' if self.show_hist else 'OFF'}")
+
+        if values["flip_h"] != self.flip_h:
+            self.flip_h = values["flip_h"]
+            print(f"左右反転: {'ON' if self.flip_h else 'OFF'}")
+        if values["flip_v"] != self.flip_v:
+            self.flip_v = values["flip_v"]
+            print(f"上下反転: {'ON' if self.flip_v else 'OFF'}")
+
+        new_ratio = max(0.01, min(0.50, values["stop_ratio_percent"] / 100.0))
+        new_threshold = max(5, min(255, values["stop_threshold"]))
+        if abs(new_ratio - ls.overflow_ratio_threshold) > 1e-9 or new_threshold != ls.brightness_threshold:
+            ls.overflow_ratio_threshold = new_ratio
+            ls.brightness_threshold = new_threshold
+            print(f"停止条件: Ratio={int(new_ratio * 100)}% Threshold>={new_threshold}")
+
+    def save_image(self, kind, save_frame):
+        """kind: "png" / "jpeg" / "fits"（文字情報なしのスタック済みフレームを保存）"""
+        ls = self.live_stack
+        cam = self.camera_meta
+        stem = f"live_stack_{self.tag}_{int(time.time())}"
+        mode = "LiveStack" if self.stacking_enabled else "LiveView"
+
+        if kind == "fits":
+            metadata = {}
+            if cam:
+                metadata.update({"EXPOSURE": cam["exposure_us"], "EXPTIME": "microseconds", "GAIN": cam["gain"]})
+            metadata.update({"STACKCNT": ls.stack_count, "MODE": mode})
+            if cam:
+                metadata["DARKFRM"] = "YES" if cam["dark"] else "NO"
+            metadata["DATE"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            save_fits(save_frame, f"{stem}.fits", metadata)
+            return
+
+        filename = f"{stem}.{'jpg' if kind == 'jpeg' else 'png'}"
+        try:
+            from PIL import Image
+
+            pil_image = Image.fromarray(cv2.cvtColor(save_frame, cv2.COLOR_BGR2RGB))
+            if kind == "jpeg":
+                import piexif
+
+                exif_0th = {
+                    piexif.ImageIFD.DateTime: time.strftime("%Y:%m:%d %H:%M:%S"),
+                    piexif.ImageIFD.ImageDescription: f"Stack Count: {ls.stack_count}",
+                }
+                if cam:
+                    exif_0th[piexif.ImageIFD.ExposureTime] = (cam["exposure_us"], 1000000)
+                pil_image.save(filename, "jpeg", exif=piexif.dump({"0th": exif_0th}))
+            else:
+                pil_image.save(filename, "png")
+        except Exception:
+            cv2.imwrite(filename, save_frame)
+        print(f"{'JPEG' if kind == 'jpeg' else 'PNG'}保存: {filename}")
+        if cam:
+            print(f"保存データ: Gain={cam['gain']}, Exposure={self.settings_menu.get_exposure_text(cam['exposure_us'])}, Stack Count={ls.stack_count}")
+
+    def handle_key(self, key, save_frame, preview_frame):
+        """両モード共通のキーを処理する。処理したらTrueを返す。"""
+        if key == ord("i"):
+            self.info_display = not self.info_display
+            self.settings_menu.set_value("Info Display", self.info_display)
+            print(f"情報表示: {'ON' if self.info_display else 'OFF'}")
+        elif key == ord("H"):
+            self.show_hist = not self.show_hist
+            self.settings_menu.set_value("Histogram", self.show_hist)
+            print(f"[hist] ヒストグラム: {'ON' if self.show_hist else 'OFF'}")
+        elif key == ord("h"):
+            self.flip_h = not self.flip_h
+            self.settings_menu.set_value("Flip H", self.flip_h)
+            print(f"左右反転: {'ON' if self.flip_h else 'OFF'}")
+        elif key == ord("v"):
+            self.flip_v = not self.flip_v
+            self.settings_menu.set_value("Flip V", self.flip_v)
+            print(f"上下反転: {'ON' if self.flip_v else 'OFF'}")
+        elif key == ord("t"):
+            self.set_stacking(not self.stacking_enabled)
+        elif key in (ord("r"), ord("R")):
+            if self.stacking_enabled:
+                self.live_stack.reset()
+                print("スタックリセット - 次のフレームから再開")
+        elif key == ord("y"):
+            self.screen_rec.toggle(preview_frame)
+        elif key in (ord("s"), ord("p")):
+            self.save_image("png", save_frame)
+        elif key == ord("j"):
+            self.save_image("jpeg", save_frame)
+        elif key == ord("f"):
+            self.save_image("fits", save_frame)
+        else:
+            return False
+        return True
+
+    def route_menu_key(self, key, key_raw):
+        """[c]/操作メニューのキー処理。(続行すべきか, 差し替え後のキー) を返す。"""
+        consumed, action_key = route_control_key(key, key_raw, self.settings_menu, self.control_menu)
+        if action_key is not None:
+            return False, action_key
+        return consumed, key
+
+    def toggle_settings(self):
+        opened = toggle_settings_menu(self.settings_menu, self.control_menu)
+        print("設定メニューを開きました" if opened else "設定メニューを閉じました")
+        return opened
+
+
 def run_stream_mode(source, args):
     """URL/カメラ番号ソースでLiveStackを実行（picamera2不要）"""
     print(f"Live Stack - Source: {source}")
-    print("操作: [q]終了 [m]メニュー [s/j]JPEG保存 [p]PNG保存 [f]FITS保存 [t]スタックON/OFF [r]リセット [i]情報表示 [h]左右反転 [v]上下反転")
+    print("操作: [q]終了 [m]設定メニュー [c]操作メニュー [s]PNG [j]JPEG [f]FITS [y]画面録画 [t]スタックON/OFF [r]リセット [i]情報表示 [h]左右反転 [v]上下反転")
 
     cap = open_capture(source)
     if not cap.isOpened():
@@ -691,26 +647,8 @@ def run_stream_mode(source, args):
         return
 
     live_stack = LiveStack(max_frames=args.max_frames)
-    stacking_enabled = False
-    info_display = True
-    flip_h = args.flip_h
-    flip_v = args.flip_v
-    screen_size = get_screen_size()
-
-    settings_menu = SettingsMenu()
-    stream_menu_names = {"Max Frames", "Stack Mode", "Info Display", "Stop Threshold", "Stop Ratio(%)"}
-    settings_menu.settings = [s for s in settings_menu.settings if s["name"] in stream_menu_names]
-    settings_menu.set_current_values(
-        camera=0,
-        gain=1.0,
-        exposure=16667,
-        max_frames=args.max_frames,
-        stack_mode=False,
-        info_display=True,
-        size_label="N/A",
-        stop_ratio_percent=10,
-        stop_threshold=255,
-    )
+    ui = LiveUi(args, live_stack, tag="source", has_camera=False)
+    ui.sync_settings_menu()
 
     try:
         while True:
@@ -720,146 +658,40 @@ def run_stream_mode(source, args):
                 break
 
             frame, source_bit_depth = normalize_frame_to_uint8(frame)
+            h, w = frame.shape[:2]
 
-            live_stack.add_to_buffer(frame)
-
-            if stacking_enabled:
-                stacked_result = live_stack.process_stack()
-                if stacked_result is None:
-                    stacked_result = frame
-                save_frame = stacked_result.copy()
-                display_frame = stacked_result.copy()
-            else:
-                save_frame = frame.copy()
-                display_frame = save_frame.copy()
-
-            if flip_h and flip_v:
-                save_frame = cv2.flip(save_frame, -1)
-                display_frame = cv2.flip(display_frame, -1)
-            elif flip_h:
-                save_frame = cv2.flip(save_frame, 1)
-                display_frame = cv2.flip(display_frame, 1)
-            elif flip_v:
-                save_frame = cv2.flip(save_frame, 0)
-                display_frame = cv2.flip(display_frame, 0)
-
-            preview_frame = fit_display_frame(display_frame, screen_size=screen_size, ratio=0.85, fallback_height=600)
-
-            if info_display:
-                h, w = frame.shape[:2]
-                mode_text = "Live Stack Mode" if stacking_enabled else "Live View Mode"
-                cv2.putText(preview_frame, mode_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-                cv2.putText(preview_frame, f"Source: {source}  {w}x{h}  {source_bit_depth}bit", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-                if stacking_enabled:
-                    cv2.putText(preview_frame, f"Frames: {live_stack.stack_count}", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    current_ratio = compute_white_ratio_uint8(save_frame, live_stack.brightness_threshold)
-                    cv2.putText(preview_frame, f"Now: {current_ratio * 100:.2f}% / Limit: {live_stack.overflow_ratio_threshold * 100:.2f}%", (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
-                preview_frame = draw_ccdf_overlay(
-                    preview_frame,
-                    save_frame,
-                    brightness_threshold=live_stack.brightness_threshold,
-                    stop_ratio=live_stack.overflow_ratio_threshold,
-                )
-
-            if settings_menu.menu_active:
-                preview_frame = settings_menu.draw_menu(preview_frame)
+            save_frame, display_frame = ui.build_frames(frame)
+            preview_frame = ui.render(display_frame, save_frame, f"Source: {source}  {w}x{h}  {source_bit_depth}bit")
 
             cv2.imshow("Live Stack", preview_frame)
 
             key_raw = cv2.waitKeyEx(1)
             key, nav = decode_key(key_raw)
 
-            if settings_menu.handle_key(key_raw):
-                if settings_menu.apply_requested:
-                    values = settings_menu.get_current_values()
-                    if values["max_frames"] != live_stack.max_frames:
-                        live_stack.max_frames = values["max_frames"]
-                        print(f"Max Frames設定: {live_stack.max_frames}")
-                    if values["stack_mode"] != stacking_enabled:
-                        stacking_enabled = values["stack_mode"]
-                        if stacking_enabled:
-                            print("LiveStack 有効")
-                            live_stack.reset()
-                        else:
-                            print("LiveStack 無効")
-                    if values["info_display"] != info_display:
-                        info_display = values["info_display"]
-                        print(f"情報表示: {'ON' if info_display else 'OFF'}")
+            skip, key = ui.route_menu_key(key, key_raw)
+            if skip:
+                continue
 
-                    live_stack.overflow_ratio_threshold = max(0.01, min(0.50, values["stop_ratio_percent"] / 100.0))
-                    live_stack.brightness_threshold = max(5, min(255, values["stop_threshold"]))
+            if ui.settings_menu.handle_key(key_raw):
+                if ui.settings_menu.apply_requested:
+                    ui.apply_settings(ui.settings_menu.get_current_values())
                 continue
 
             if key == ord("q"):
                 break
             elif key == ord("m"):
-                settings_menu.menu_active = not settings_menu.menu_active
-            elif key in [ord("s"), ord("j")]:
-                filename = f"live_stack_source_{int(time.time())}.jpg"
-                try:
-                    from PIL import Image
-                    import piexif
-
-                    pil_image = Image.fromarray(cv2.cvtColor(save_frame, cv2.COLOR_BGR2RGB))
-                    exif_dict = {
-                        "0th": {
-                            piexif.ImageIFD.DateTime: time.strftime("%Y:%m:%d %H:%M:%S"),
-                            piexif.ImageIFD.ImageDescription: f"Stack Count: {live_stack.stack_count}",
-                        }
-                    }
-                    exif_bytes = piexif.dump(exif_dict)
-                    pil_image.save(filename, "jpeg", exif=exif_bytes)
-                except Exception:
-                    cv2.imwrite(filename, save_frame)
-                print(f"JPEG保存: {filename}")
-            elif key == ord("p"):
-                filename = f"live_stack_source_{int(time.time())}.png"
-                try:
-                    from PIL import Image
-
-                    pil_image = Image.fromarray(cv2.cvtColor(save_frame, cv2.COLOR_BGR2RGB))
-                    pil_image.save(filename, "png")
-                except Exception:
-                    cv2.imwrite(filename, save_frame)
-                print(f"PNG保存: {filename}")
-            elif key == ord("f"):
-                metadata = {
-                    "STACKCNT": live_stack.stack_count,
-                    "MODE": "LiveStack" if stacking_enabled else "LiveView",
-                    "DATE": time.strftime("%Y-%m-%d %H:%M:%S"),
-                }
-                filename = f"live_stack_source_{int(time.time())}.fits"
-                save_fits(save_frame, filename, metadata)
-            elif key == ord("t"):
-                stacking_enabled = not stacking_enabled
-                for s in settings_menu.settings:
-                    if s["name"] == "Stack Mode":
-                        s["value"] = stacking_enabled
-                        break
-                if stacking_enabled:
-                    print("LiveStack 有効")
-                    live_stack.reset()
-                else:
-                    print("LiveStack 無効")
-            elif key == ord("r"):
-                if stacking_enabled:
-                    live_stack.reset()
-                    print("スタックリセット")
-            elif key == ord("i"):
-                info_display = not info_display
-                print(f"情報表示: {'ON' if info_display else 'OFF'}")
-            elif key == ord("h"):
-                flip_h = not flip_h
-                print(f"左右反転: {'ON' if flip_h else 'OFF'}")
-            elif key == ord("v"):
-                flip_v = not flip_v
-                print(f"上下反転: {'ON' if flip_v else 'OFF'}")
+                if ui.toggle_settings():
+                    ui.sync_settings_menu()
+            else:
+                ui.handle_key(key, save_frame, preview_frame)
     except KeyboardInterrupt:
         print("\n終了中...")
     finally:
+        ui.screen_rec.stop("終了につき保存")
         cap.release()
         cv2.destroyAllWindows()
         print("Live Stack終了")
+
 
 def main():
     parser = argparse.ArgumentParser(description="LiveStack機能付きカメラプレビュー")
@@ -871,6 +703,8 @@ def main():
                         help="左右反転して起動")
     parser.add_argument("--flip-v", action="store_true",
                         help="上下反転して起動")
+    parser.add_argument("--screen-fps", type=float, default=15.0,
+                        help="画面録画([y]キー/操作メニュー)のフレームレート (デフォルト: 15)")
     args = parser.parse_args()
 
     parsed_source = parse_source_arg(args.source)
@@ -890,22 +724,19 @@ def main():
     print("Live Stack - LiveStack機能付きカメラプレビュー（カメラ切り替え機能付き）")
     print("操作:")
     print("  [q] 終了")
-    print("  [m] 設定メニュー")  # 新機能
-    print("  [i] 情報表示ON/OFF")  # 新機能
-    print("  [c] カメラ切り替え")  # 新機能
-    print("  [s] 保存")
+    print("  [m] 設定メニュー  [c] 操作メニュー（保存・画面録画・リセット・ダーク・カメラ切替）")
+    print("  [i] 情報表示ON/OFF")
+    print("  [k] カメラ切り替え")
+    print("  [s] PNG保存  [j] JPEG保存  [f] FITS保存")
+    print("  [y] 画面録画AVI開始/停止")
     print("  [t] LiveStack ON/OFF")
     print("  [r] スタックリセット")
     print("  [h] 左右反転トグル")
     print("  [v] 上下反転トグル")
     print("  [d] ダークフレーム取得")
-    print("  [f] FITS保存  [j] JPEG保存  [p] PNG保存")
     print("従来のキー操作:")
     print("  [+/-] ゲイン調整  [0-9] シャッター速度")
-    
-    # 設定メニュー初期化
-    settings_menu = SettingsMenu()
-    
+
     # カメラ初期化
     current_camera = 0
     low_light_mode = False
@@ -915,42 +746,38 @@ def main():
     available_sizes = CameraConfig.get_available_sizes(current_camera)
     size_labels = [size_to_label(size) for size in available_sizes]
     current_size_label = size_labels[0] if size_labels else "N/A"
-    settings_menu.set_size_choices(size_labels, current_size_label)
-    
+
     picam2 = create_camera_safely(current_camera, current_gain, current_exposure, low_light_mode, label_to_size(current_size_label))
-    
+
     if picam2 is None:
         print("カメラの初期化に失敗しました。")
         return
-    
+
     print(f"カメラ {current_camera} を使用中")
-    
+
     # LiveStack初期化
     live_stack = LiveStack(max_frames=args.max_frames)
     print(f"最大スタックフレーム数: {args.max_frames}")
 
-    # フリップ設定初期化
-    flip_h = args.flip_h  # 左右反転
-    flip_v = args.flip_v  # 上下反転
-    if flip_h or flip_v:
-        print(f"フリップ: {'H' if flip_h else ''}{' V' if flip_v else ''}".strip())
-    stacking_enabled = False
+    ui = LiveUi(args, live_stack, tag=f"cam{current_camera}", has_camera=True)
+    settings_menu = ui.settings_menu
+    if ui.flip_h or ui.flip_v:
+        print(f"フリップ: {'H' if ui.flip_h else ''}{' V' if ui.flip_v else ''}".strip())
     dark_frame_set = False  # ダークフレーム取得状態を管理
-    info_display = True  # 情報表示フラグ
-    screen_size = get_screen_size()
-    
-    # 設定メニューの初期値を設定
-    settings_menu.set_current_values(
-        current_camera,
-        current_gain,
-        current_exposure,
-        args.max_frames,
-        stacking_enabled,
-        info_display,
-        current_size_label,
-        int(live_stack.overflow_ratio_threshold * 100),
-        live_stack.brightness_threshold,
-    )
+
+    settings_menu.set_size_choices(size_labels, current_size_label)
+    ui.sync_settings_menu(camera=current_camera, gain=current_gain, exposure=current_exposure, size_label=current_size_label)
+
+    def reset_dark_and_buffer():
+        """ダークフレームとリングバッファをリセット"""
+        nonlocal dark_frame_set
+        try:
+            live_stack.dark_frame = None
+            live_stack.dark_buffer = []
+            dark_frame_set = False
+            print("ダークフレームとリングバッファをリセットしました。")
+        except Exception as e:
+            print(f"リセット中にエラーが発生しました: {e}")
 
     try:
         picam2.start()
@@ -962,77 +789,25 @@ def main():
             frame, source_bit_depth = normalize_frame_to_uint8(frame)
             h, w = frame.shape[:2]
 
-            # リングバッファにフレームを追加
-            live_stack.add_to_buffer(frame)
+            save_frame, display_frame = ui.build_frames(frame)
+            ui.tag = f"cam{current_camera}"
+            ui.camera_meta = {"exposure_us": current_exposure, "gain": current_gain, "dark": dark_frame_set}
 
-            # LiveStack処理
-            if stacking_enabled:
-                stacked_result = live_stack.process_stack()
-                if stacked_result is None:
-                    stacked_result = frame
-                
-                # 保存用フレーム（テキスト情報なし）
-                save_frame = stacked_result.copy()
-                
-                # 表示用フレーム（テキスト情報あり）
-                display_frame = stacked_result.copy()
-            else:
-                # 保存用フレーム（テキスト情報なし）
-                save_frame = frame.copy()
-                
-                # 表示用フレーム
-                display_frame = save_frame.copy()
+            camera_info = f"Cam{current_camera} Gain:{current_gain} Exp:{settings_menu.get_exposure_text(current_exposure)} Size:{w}x{h} {source_bit_depth}bit"
+            preview_frame = ui.render(display_frame, save_frame, camera_info,
+                                      extra_lines=["Dark Frame Set"] if dark_frame_set else ())
 
-            # フリップ処理（出力側で即時反映）
-            if flip_h and flip_v:
-                save_frame = cv2.flip(save_frame, -1)
-                display_frame = cv2.flip(display_frame, -1)
-            elif flip_h:
-                save_frame = cv2.flip(save_frame, 1)
-                display_frame = cv2.flip(display_frame, 1)
-            elif flip_v:
-                save_frame = cv2.flip(save_frame, 0)
-                display_frame = cv2.flip(display_frame, 0)
-
-            # 表示用にのみ縮小（内部処理・保存用フレームは元解像度のまま）
-            preview_frame = fit_display_frame(display_frame, screen_size=screen_size, ratio=0.85, fallback_height=600)
-
-            # 情報表示は縮小後フレームに描画（高解像度入力時の可読性改善）
-            if info_display:
-                mode_text = "Live Stack Mode" if stacking_enabled else "Live View Mode"
-                cv2.putText(preview_frame, mode_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-
-                camera_info = f"Cam{current_camera} Gain:{current_gain} Exp:{settings_menu.get_exposure_text(current_exposure)} Size:{w}x{h} {source_bit_depth}bit"
-                cv2.putText(preview_frame, camera_info, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-
-                if stacking_enabled:
-                    stack_info = f"Frames: {live_stack.stack_count}"
-                    cv2.putText(preview_frame, stack_info, (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    current_ratio = compute_white_ratio_uint8(save_frame, live_stack.brightness_threshold)
-                    cv2.putText(preview_frame, f"Now: {current_ratio * 100:.2f}% / Limit: {live_stack.overflow_ratio_threshold * 100:.2f}%", (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
-
-                if dark_frame_set:
-                    cv2.putText(preview_frame, "Dark Frame Set", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-
-                # 累積ヒストグラム(CDF)を表示
-                preview_frame = draw_ccdf_overlay(
-                    preview_frame,
-                    save_frame,
-                    brightness_threshold=live_stack.brightness_threshold,
-                    stop_ratio=live_stack.overflow_ratio_threshold,
-                )
-
-            # 設定メニューは縮小後フレームに描画
-            if settings_menu.menu_active:
-                preview_frame = settings_menu.draw_menu(preview_frame)
-            
             # プレビュー表示
             cv2.imshow("Live Stack", preview_frame)
-            
+
             # キー入力処理
             key_raw = cv2.waitKeyEx(1)
             key, nav = decode_key(key_raw)
-            
+
+            skip, key = ui.route_menu_key(key, key_raw)
+            if skip:
+                continue
+
             # 設定メニューのキー処理（優先）
             if settings_menu.handle_key(key_raw):
                 if not settings_menu.apply_requested:
@@ -1040,16 +815,16 @@ def main():
 
                 # 設定が変更された場合の処理
                 values = settings_menu.get_current_values()
-                
+
                 # カメラ切り替えの処理
                 if values["camera"] != current_camera:
                     new_camera = values["camera"]
                     print(f"設定メニューからカメラ {new_camera} に切り替え中...")
-                    
+
                     # 現在のカメラを停止
                     picam2.stop()
                     picam2.close()
-                    
+
                     # 新しいカメラを作成
                     new_available_sizes = CameraConfig.get_available_sizes(new_camera)
                     new_size_labels = [size_to_label(size) for size in new_available_sizes]
@@ -1057,7 +832,7 @@ def main():
                     target_size_label = requested_size_label if requested_size_label in new_size_labels else (new_size_labels[0] if new_size_labels else "N/A")
 
                     new_picam2 = create_camera_safely(new_camera, current_gain, current_exposure, low_light_mode, label_to_size(target_size_label))
-                    
+
                     if new_picam2 is not None:
                         # 切り替え成功
                         picam2 = new_picam2
@@ -1065,16 +840,16 @@ def main():
                         picam2.start()
                         time.sleep(1)
                         print(f"カメラ {current_camera} に切り替えました")
-                        
+
                         # カメラ切り替え時にバッファとスタックをリセット
                         live_stack.reset()
                         live_stack.dark_frame = None
                         live_stack.dark_buffer = []
                         dark_frame_set = False
                         print("設定メニューでのカメラ切り替えに伴いバッファとスタックをリセットしました")
-                        
+
                         # メニューの表示を更新
-                        settings_menu.settings[0]["value"] = current_camera
+                        settings_menu.set_value("Camera", current_camera)
                         settings_menu.set_size_choices(new_size_labels, target_size_label)
                         current_size_label = target_size_label
                     else:
@@ -1086,26 +861,18 @@ def main():
                             time.sleep(1)
                             print(f"カメラ {current_camera} に復帰しました")
                             # メニューの値も元に戻す
-                            settings_menu.settings[0]["value"] = current_camera
+                            settings_menu.set_value("Camera", current_camera)
                         else:
                             print("カメラの復帰に失敗しました。")
                             break
-                
+
                 # カメラ設定を適用
                 if values["gain"] != current_gain or values["exposure"] != current_exposure:
                     current_gain = values["gain"]
                     current_exposure = values["exposure"]
                     CameraConfig.apply_camera_settings(picam2, current_exposure, current_gain)
                     print(f"設定適用: Gain={current_gain}, Exposure={settings_menu.get_exposure_text(current_exposure)}")
-                    
-                    # ダークフレームとリングバッファをリセット
-                    try:
-                        live_stack.dark_frame = None
-                        live_stack.dark_buffer = []
-                        dark_frame_set = False
-                        print("ダークフレームとリングバッファをリセットしました。")
-                    except Exception as e:
-                        print(f"リセット中にエラーが発生しました: {e}")
+                    reset_dark_and_buffer()
 
                 # Size設定を適用
                 if values["size_label"] != current_size_label:
@@ -1127,7 +894,7 @@ def main():
                     else:
                         print("サイズ変更後のカメラ初期化に失敗。前の設定で復旧を試みます。")
                         current_size_label = previous_size_label
-                        settings_menu.settings[1]["value"] = current_size_label
+                        settings_menu.set_value("Size", current_size_label)
                         picam2 = create_camera_safely(current_camera, current_gain, current_exposure, low_light_mode, label_to_size(current_size_label))
                         if picam2 is not None:
                             picam2.start()
@@ -1136,84 +903,35 @@ def main():
                         else:
                             print("カメラの復旧にも失敗しました。")
                             break
-                
-                # Max Frames設定を適用
-                if values["max_frames"] != live_stack.max_frames:
-                    live_stack.max_frames = values["max_frames"]
-                    print(f"Max Frames設定: {live_stack.max_frames}")
-                
-                # Stack Mode設定を適用
-                if values["stack_mode"] != stacking_enabled:
-                    stacking_enabled = values["stack_mode"]
-                    if stacking_enabled:
-                        print("LiveStack 有効")
-                        live_stack.reset()
-                    else:
-                        print("LiveStack 無効")
-                
-                # Info Display設定を適用
-                if values["info_display"] != info_display:
-                    info_display = values["info_display"]
-                    print(f"情報表示: {'ON' if info_display else 'OFF'}")
 
-                # スタック停止条件（比率・しきい値）を適用
-                new_overflow_ratio_threshold = max(0.01, min(0.50, values["stop_ratio_percent"] / 100.0))
-                new_brightness_threshold = max(5, min(255, values["stop_threshold"]))
-                if (
-                    abs(new_overflow_ratio_threshold - live_stack.overflow_ratio_threshold) > 1e-9
-                    or new_brightness_threshold != live_stack.brightness_threshold
-                ):
-                    live_stack.overflow_ratio_threshold = new_overflow_ratio_threshold
-                    live_stack.brightness_threshold = new_brightness_threshold
-                    print(
-                        f"停止条件: Ratio={int(live_stack.overflow_ratio_threshold * 100)}% "
-                        f"Threshold>={live_stack.brightness_threshold}"
-                    )
-                
+                # Max Frames / Stack Mode / 表示 / 反転 / 停止条件 は両モード共通
+                ui.apply_settings(values)
                 continue
-            
+
             # 既存のキー処理
             if key == ord("q"):
                 break
             elif key == ord("m"):  # 設定メニュー表示
-                settings_menu.menu_active = not settings_menu.menu_active
-                if settings_menu.menu_active:
+                if ui.toggle_settings():
                     # 現在の設定値をメニューに反映
-                    settings_menu.set_current_values(
-                        current_camera,
-                        current_gain,
-                        current_exposure,
-                        live_stack.max_frames,
-                        stacking_enabled,
-                        info_display,
-                        current_size_label,
-                        int(live_stack.overflow_ratio_threshold * 100),
-                        live_stack.brightness_threshold,
-                    )
-                    print("設定メニューを開きました")
-                else:
-                    print("設定メニューを閉じました")
-            elif key == ord("i"):  # 情報表示ON/OFF
-                info_display = not info_display
-                settings_menu.settings[6]["value"] = info_display  # メニューも同期
-                print(f"情報表示: {'ON' if info_display else 'OFF'}")
-            elif key == ord("c"):  # カメラ切り替え
+                    ui.sync_settings_menu(camera=current_camera, gain=current_gain, exposure=current_exposure, size_label=current_size_label)
+            elif key == ord("k"):  # カメラ切り替え
                 print("カメラを切り替え中...")
-                
+
                 # 現在のカメラを停止
                 picam2.stop()
                 picam2.close()
-                
+
                 # 次のカメラ番号を決定（0と1の間で切り替え）
                 next_camera = 1 - current_camera
-                
+
                 # 新しいカメラを作成
                 next_available_sizes = CameraConfig.get_available_sizes(next_camera)
                 next_size_labels = [size_to_label(size) for size in next_available_sizes]
                 target_size_label = current_size_label if current_size_label in next_size_labels else (next_size_labels[0] if next_size_labels else "N/A")
 
                 new_picam2 = create_camera_safely(next_camera, current_gain, current_exposure, low_light_mode, label_to_size(target_size_label))
-                
+
                 if new_picam2 is not None:
                     # 切り替え成功
                     picam2 = new_picam2
@@ -1221,16 +939,16 @@ def main():
                     picam2.start()
                     time.sleep(1)
                     print(f"カメラ {current_camera} に切り替えました")
-                    
+
                     # カメラ切り替え時にバッファとスタックをリセット
                     live_stack.reset()
                     live_stack.dark_frame = None
                     live_stack.dark_buffer = []
                     dark_frame_set = False
                     print("カメラ切り替えに伴いバッファとスタックをリセットしました")
-                    
+
                     # メニューの表示も同期
-                    settings_menu.settings[0]["value"] = current_camera
+                    settings_menu.set_value("Camera", current_camera)
                     settings_menu.set_size_choices(next_size_labels, target_size_label)
                     current_size_label = target_size_label
                 else:
@@ -1245,33 +963,11 @@ def main():
                         print("カメラの復帰に失敗しました。")
                         break
             elif key == ord("d"):
-                if not stacking_enabled:
+                if not ui.stacking_enabled:
                     live_stack.set_dark_frame(frame)
                     dark_frame_set = True
                 else:
                     print("ダークフレームはLiveViewモードでのみ取得可能です。")
-            elif key == ord("s"):
-                filename = f"live_stack_cam{current_camera}_{int(time.time())}.jpg"
-                cv2.imwrite(filename, save_frame)
-                print(f"画像保存: {filename}")
-            elif key == ord("t"):
-                stacking_enabled = not stacking_enabled
-                settings_menu.settings[5]["value"] = stacking_enabled  # メニューも同期
-                if stacking_enabled:
-                    print("LiveStack 有効")
-                    live_stack.reset()
-                else:
-                    print("LiveStack 無効")
-            elif key == ord("r"):
-                if stacking_enabled:
-                    live_stack.reset()
-                    print("スタックリセット - 次のフレームから再開")
-            elif key == ord("h"):  # 左右反転トグル
-                flip_h = not flip_h
-                print(f"左右反転: {'ON' if flip_h else 'OFF'}")
-            elif key == ord("v"):  # 上下反転トグル
-                flip_v = not flip_v
-                print(f"上下反転: {'ON' if flip_v else 'OFF'}")
             elif key in [ord("1"), ord("2"), ord("3"), ord("4"), ord("5"), ord("6"), ord("7"), ord("8"), ord("9"), ord("0")]:
                 # シャッター速度変更
                 exposure_times = {
@@ -1287,18 +983,10 @@ def main():
                     ord("0"): 2000
                 }
                 current_exposure = exposure_times[key]
-                settings_menu.settings[3]["value"] = current_exposure  # メニューも同期
+                settings_menu.set_value("Exposure", current_exposure)  # メニューも同期
                 CameraConfig.apply_camera_settings(picam2, current_exposure, current_gain)
                 print(f"露出: {settings_menu.get_exposure_text(current_exposure)}")
-
-                # ダークフレームとリングバッファをリセット
-                try:
-                    live_stack.dark_frame = None
-                    live_stack.dark_buffer = []  # リングバッファをリセット
-                    dark_frame_set = False
-                    print("ダークフレームとリングバッファをリセットしました。")
-                except Exception as e:
-                    print(f"リセット中にエラーが発生しました: {e}")
+                reset_dark_and_buffer()
 
             elif key in [ord("+"), ord("-")]:
                 # ゲイン変更
@@ -1306,71 +994,19 @@ def main():
                     current_gain = min(8.0, current_gain + 0.5)
                 elif key == ord("-"):
                     current_gain = max(1.0, current_gain - 0.5)
-                settings_menu.settings[2]["value"] = current_gain  # メニューも同期
+                settings_menu.set_value("Gain", current_gain)  # メニューも同期
                 CameraConfig.apply_camera_settings(picam2, current_exposure, current_gain)
                 print(f"ゲイン: {current_gain}")
-
-                # ダークフレームとリングバッファをリセット
-                try:
-                    live_stack.dark_frame = None
-                    live_stack.dark_buffer = []  # リングバッファをリセット
-                    dark_frame_set = False
-                    print("ダークフレームとリングバッファをリセットしました。")
-                except Exception as e:
-                    print(f"リセット中にエラーが発生しました: {e}")
-            elif key == ord("f"):
-                # FITS保存（文字情報なしのスタック済みフレームを保存）
-                metadata = {
-                    "EXPOSURE": current_exposure,  # 露光時間
-                    "EXPTIME": "microseconds",  # 露光時間の単位
-                    "GAIN": current_gain,
-                    "STACKCNT": live_stack.stack_count,
-                    "MODE": "LiveStack" if stacking_enabled else "LiveView",
-                    "DARKFRM": "YES" if dark_frame_set else "NO",
-                    "DATE": time.strftime("%Y-%m-%d %H:%M:%S")
-                }
-                filename = f"live_stack_cam{current_camera}_{int(time.time())}.fits"
-                save_fits(save_frame, filename, metadata)
-
-            elif key == ord("j"):
-                # JPEG保存
-                filename = f"live_stack_cam{current_camera}_{int(time.time())}.jpg"
-                try:
-                    from PIL import Image
-                    import piexif
-
-                    pil_image = Image.fromarray(cv2.cvtColor(save_frame, cv2.COLOR_BGR2RGB))
-                    exif_dict = {
-                        "0th": {
-                            piexif.ImageIFD.DateTime: time.strftime("%Y:%m:%d %H:%M:%S"),
-                            piexif.ImageIFD.ExposureTime: (current_exposure, 1000000),
-                            piexif.ImageIFD.ImageDescription: f"Stack Count: {live_stack.stack_count}"
-                        }
-                    }
-                    exif_bytes = piexif.dump(exif_dict)
-                    pil_image.save(filename, "jpeg", exif=exif_bytes)
-                except Exception:
-                    cv2.imwrite(filename, save_frame)
-                print(f"JPEGファイル保存: {filename}")
-
-            elif key == ord("p"):
-                # PNG保存
-                filename = f"live_stack_cam{current_camera}_{int(time.time())}.png"
-                try:
-                    from PIL import Image
-
-                    pil_image = Image.fromarray(cv2.cvtColor(save_frame, cv2.COLOR_BGR2RGB))
-                    pil_image.save(filename, "png")
-                except Exception:
-                    cv2.imwrite(filename, save_frame)
-                print(f"PNGファイル保存: {filename}")
-                print(f"保存データ: Gain={current_gain}, Exposure={settings_menu.get_exposure_text(current_exposure)}, Stack Count={live_stack.stack_count}")
+                reset_dark_and_buffer()
+            else:
+                ui.handle_key(key, save_frame, preview_frame)
 
     except KeyboardInterrupt:
         print("\n終了中...")
     except Exception as e:
         print(f"エラー: {e}")
     finally:
+        ui.screen_rec.stop("終了につき保存")
         if picam2 is not None:
             picam2.stop()
             picam2.close()

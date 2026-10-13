@@ -49,6 +49,7 @@ camera-live/
 │   ├── camera_config.py  # 共通カメラ設定
 │   ├── display_utils.py  # 表示ユーティリティ
 │   ├── hist_overlay.py   # ヒストグラム+CCDFオーバーレイ
+│   ├── ui_menus.py       # 設定メニュー・操作メニュー・画面録画（両アプリ共通）
 │   └── raw_utils.py      # RAW受信・デコード・WB/ガンマ共通処理
 └── README.md
 ```
@@ -199,24 +200,31 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 
 #### 操作方法
 
+`raw_live_stack.py` と同じ操作感です（メニューは共通モジュール `common/ui_menus.py`）。
+
 **基本操作:**
 - `q`: 終了
-- `m`: 設定メニュー開閉
+- `m`: 設定メニュー開閉（上下で項目選択、左右で値変更・即時反映。ON/OFFは左右どちらでも反転）
+- `c`: 操作メニュー開閉（上下で選択、Enterで実行、ESC/`c`で閉じる。`m`/`c` で相互に切替）
 - `i`: 情報表示ON/OFF
-- `c`: カメラ切り替え（0 ↔ 1）
-- `s`: 画像保存  
+- `H`: ヒストグラム/CCDF表示ON/OFF（設定メニューの `Histogram` でも切替）
 - `t`: LiveStack ON/OFF切り替え
 - `r`: スタックリセット
-- `h`: 左右反転トグル
-- `v`: 上下反転トグル
-- `d`: ダークフレーム取得
+- `h` / `v`: 左右 / 上下反転トグル
+- `y`: 画面録画AVI開始/停止（info・ヒストグラム・メニュー込み。`--screen-fps` でfps指定、デフォルト15）
+- `k`: カメラ切り替え（0 ↔ 1、picamera2直結モードのみ。旧 `c`）
+- `d`: ダークフレーム取得（picamera2直結モードのみ）
 
 **保存操作:**
-- `f`: FITS形式で保存
+- `s` / `p`: PNG形式で保存
 - `j`: JPEG形式で保存
-- `p`: PNG形式で保存
+- `f`: FITS形式で保存
 
-**従来のキー操作:**
+**操作メニュー（`c`）の項目:** Save PNG / Save JPEG / Save FITS / Screen Rec (AVI) / Stack Reset。picamera2直結モードでは Dark Capture / Switch Camera も表示。Linux の Qt 版 OpenCV では大文字キーが使えないため、メニューから実行できます。
+
+**設定メニュー（`m`）の項目:** Stop Threshold / Stop Ratio(%) / Max Frames / Info Display / Histogram / Flip H / Flip V / Stack Mode（picamera2直結モードでは Camera / Size / Gain / Exposure も表示）。
+
+**従来のキー操作（picamera2直結モード）:**
 - `+`/`-`: ゲイン調整
 - `1`〜`0`: シャッター速度変更
 
@@ -253,7 +261,7 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 #### カメラ切り替え機能
 **2つの切り替え方法:**
 1. **設定メニュー**: `[m]`キーでメニューを開き、Camera項目で左右矢印キーで切り替え
-2. **直接キー**: `[c]`キーで即座にカメラ0と1を切り替え
+2. **直接キー**: `[k]`キーで即座にカメラ0と1を切り替え（操作メニュー `c` の `Switch Camera` でも可）
 
 **安全機能:**
 - カメラ切り替え時の自動バッファリセット
@@ -277,7 +285,7 @@ Live Stackモードでは以下の形式で画像を保存できます。
 **操作:**
 - `f`: FITS形式で保存
 - `j`: JPEG形式で保存
-- `p`: PNG形式で保存
+- `s` / `p`: PNG形式で保存
 
 #### 注意点
 - JPEG保存時にEXIFデータが正しく付与されるよう修正済み。
@@ -398,6 +406,11 @@ pip install -r requirements.txt
 ```
 
 ## 変更履歴
+
+#### 2026/10/13 live_stack.py: raw_live_stack.py と操作性を統一
+- **UI部品を `common/ui_menus.py` に共通化**: `SettingsMenu` / `ControlMenu` / `ScreenRecorder` を両アプリで共有。
+- **`live_stack.py` に追加**: 操作メニュー（`c`）、画面録画（`y` / `--screen-fps`）、設定メニューの `Histogram` / `Flip H` / `Flip V`、左右キーの即時反映、メニューの項目並び（Stop系を先頭・Stack Modeを最下位）。
+- **キー割当の変更**: カメラ切り替えを `c` → `k` に、`s` を JPEG → PNG に変更（`raw_live_stack.py` と統一。`p` は引き続きPNG）。
 
 #### 2026/10/13 raw_live_stack.py: Linux(Qt版OpenCV)対応
 - **`--max-frames max` / `0` 追加**: メモリ見積もり上限まで自動で使う。
