@@ -161,6 +161,9 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - Linux の Qt 版 OpenCV では Shift が反映されないため、大文字キー（`S`/`W` 等）は使えない。`S` は `x`、`W` は `u` で代用する。`A`/`E`/`H` は設定メニューの `Align`/`Dark Sub`/`Histogram` から切替できる。他の大文字キー機能も `c` の操作メニューから実行できる
 - `z`: フォーカスアシストズーム ON/OFF（ON中にクリック/ドラッグで拡大エリアを選択）
 
+**最大フレーム数オプション:**
+- `--max-frames N`: リングバッファの最大フレーム数（デフォルト 100）。`--max-frames max`（または `0`）で、解像度と空きメモリから見積もった上限（空きメモリの50%）まで使う。メモリの大きいPCで長時間スタックしたいときに便利（例: 3840x2160で空き約120GBなら約1960フレーム）。JSON設定では `"max_frames": "max"` も可
+
 **SER反転オプション:**
 - `--ser-flip`: SER録画にも `--flip-h`/`--flip-v`（`[h]`/`[v]`）の状態を反映（録画開始時に固定、ColorIDも更新）。既定ではSERは生Bayerのまま反転しない。理由は `仕様.md` の「SER録画機能」を参照
 
@@ -397,6 +400,7 @@ pip install -r requirements.txt
 ## 変更履歴
 
 #### 2026/10/13 raw_live_stack.py: Linux(Qt版OpenCV)対応
+- **`--max-frames max` / `0` 追加**: メモリ見積もり上限まで自動で使う。
 - **右矢印でSER録画が始まる問題を修正**: 矢印キーのコードが `S` と衝突していた。矢印・Home/Endを専用判定に分離（`common/display_utils.py` の `decode_key()`）。
 - **TCP受信でSER録画フレーム数が0のままになる不具合を修正**。
 - **Shift不可への対処**: SER録画に `[x]`、WBリセットに `[u]` を追加。

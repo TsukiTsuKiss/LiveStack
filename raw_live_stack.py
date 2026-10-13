@@ -1486,9 +1486,13 @@ def run_raw_live_stack(args):
         stack_enabled = False
         # 利用可能メモリと解像度からmax_framesの安全上限を見積もり、--max-framesをクランプする
         max_frames_limit = estimate_max_frames_limit(raw_w, raw_h)
-        max_frames = min(args.max_frames, max_frames_limit)
-        if max_frames < args.max_frames:
-            print(f"[warn] --max-frames {args.max_frames} はメモリ見積もり上限を超えるため {max_frames} にクランプしました")
+        if args.max_frames <= 0:
+            max_frames = max_frames_limit
+            print(f"[info] --max-frames max: メモリ見積もり上限 {max_frames} フレームを使用します")
+        else:
+            max_frames = min(args.max_frames, max_frames_limit)
+            if max_frames < args.max_frames:
+                print(f"[warn] --max-frames {args.max_frames} はメモリ見積もり上限を超えるため {max_frames} にクランプしました")
         live_stack = LiveStack(max_frames=max_frames, verbose=False, bits=effective_bits)
         live_stack.hot_sigma = args.hot_sigma
         if _preloaded_dark is not None:
@@ -2527,6 +2531,19 @@ def run_raw_live_stack(args):
         print("RAW Live Stack終了")
 
 
+def _max_frames_arg(value):
+    """--max-frames の値: 整数、または "max"/0 でメモリ見積もり上限（内部では0）"""
+    if isinstance(value, str) and value.strip().lower() == "max":
+        return 0
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        n = -1
+    if n < 0:
+        raise argparse.ArgumentTypeError("--max-frames は 0 以上の整数か 'max' を指定してください")
+    return n
+
+
 def build_arg_parser():
     parser = argparse.ArgumentParser(description="RAW Live Stack (rpicam-raw TCP receiver + LiveStack)")
     parser.add_argument("--source", required=True, help="接続先 (例: tcp://192.168.1.17:8888)。.ser を指定するとファイルをループ再生するテストモード")
@@ -2545,7 +2562,7 @@ def build_arg_parser():
     parser.add_argument("--skip", type=int, default=0, help="フレーム先頭の読み飛ばしバイト数 (通常不要)")
     parser.add_argument("--timeout", type=int, default=120, help="受信タイムアウト秒 (デフォルト: 120)")
     parser.add_argument("--no-stretch", action="store_true", help="自動ストレッチを無効化 (デフォルト: ストレッチ有効)")
-    parser.add_argument("--max-frames", type=int, default=100, help="LiveStack最大フレーム数 (デフォルト: 100)")
+    parser.add_argument("--max-frames", type=_max_frames_arg, default=100, help="LiveStack最大フレーム数 (デフォルト: 100)。'max' または 0 でメモリ見積もり上限まで使う")
     parser.add_argument("--ser-fps", type=float, default=5.0, help="SERファイル入力時の再生フレームレート (デフォルト: 5)")
     parser.add_argument("--screen-fps", type=float, default=15.0, help="画面録画([y]キー/操作メニュー)のフレームレート (デフォルト: 15)")
     parser.add_argument("--ser-lsb", action="store_true", help="SER書き出し/読み込みを下位詰め(LSB-aligned)にする (デフォルト: 上位詰めMSB-aligned)")
