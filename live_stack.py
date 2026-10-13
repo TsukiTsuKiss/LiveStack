@@ -11,7 +11,7 @@ import argparse
 sys.path.append(os.path.join(os.path.dirname(__file__), 'common'))
 
 from hist_overlay import draw_hist_ccdf_overlay
-from display_utils import clamp, draw_info_lines, fit_display_frame, get_screen_size
+from display_utils import clamp, decode_key, draw_info_lines, fit_display_frame, get_screen_size
 import cv2
 import numpy as np
 import time
@@ -419,33 +419,18 @@ class SettingsMenu:
 
         self.apply_requested = False
 
-        # キーの下位8bit（通常キー）
-        key = key_raw & 0xFF
+        key, nav = decode_key(key_raw)
 
-        # waitKeyExの矢印キー値（Windows）
-        if key_raw == 2490368:  # Up
+        if nav == "up":
             self.selected_item = (self.selected_item - 1) % len(self.settings)
             return True
-        elif key_raw == 2621440:  # Down
+        elif nav == "down":
             self.selected_item = (self.selected_item + 1) % len(self.settings)
             return True
-        elif key_raw == 2424832:  # Left
+        elif nav == "left":
             self.change_value(-1)
             return True
-        elif key_raw == 2555904:  # Right
-            self.change_value(1)
-            return True
-        # 互換用（環境差異）
-        elif key in [82, 65]:  # 上
-            self.selected_item = (self.selected_item - 1) % len(self.settings)
-            return True
-        elif key in [84, 66]:  # 下
-            self.selected_item = (self.selected_item + 1) % len(self.settings)
-            return True
-        elif key in [81, 68]:  # 左
-            self.change_value(-1)
-            return True
-        elif key in [83, 67]:  # 右
+        elif nav == "right":
             self.change_value(1)
             return True
         elif key in [10, 13]:  # Enter(LF/CR) - 設定適用（メニューは閉じない）
@@ -782,7 +767,7 @@ def run_stream_mode(source, args):
             cv2.imshow("Live Stack", preview_frame)
 
             key_raw = cv2.waitKeyEx(1)
-            key = key_raw & 0xFF
+            key, nav = decode_key(key_raw)
 
             if settings_menu.handle_key(key_raw):
                 if settings_menu.apply_requested:
@@ -1046,7 +1031,7 @@ def main():
             
             # キー入力処理
             key_raw = cv2.waitKeyEx(1)
-            key = key_raw & 0xFF
+            key, nav = decode_key(key_raw)
             
             # 設定メニューのキー処理（優先）
             if settings_menu.handle_key(key_raw):

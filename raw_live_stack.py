@@ -16,7 +16,7 @@ rpicam-raw TCP生ストリーム専用ライブスタック
     [i] 情報表示 ON/OFF
     [s] PNG保存 (WB/ガンマ適用後、tEXtメタデータ付き)
     [j] JPEG保存 (WB/ガンマ適用後、EXIF付き)
-    [S] SER保存 (バッファ全フレームをマルチフレームSER)
+    [S]/[x] SER保存 (バッファ全フレームをマルチフレームSER)
     [r] NPY保存 (16bit RAW展開後)
     [f] FITS保存
     [n] 次のフォーマット候補に切替
@@ -35,7 +35,7 @@ rpicam-raw TCP生ストリーム専用ライブスタック
     [t] LiveStack ON/OFF
     [R] LiveStackリセット
     [w] 白点クリックWB ON/OFF
-    [W] WBリセット (B/G/R=1.0)
+    [W]/[u] WBリセット (B/G/R=1.0)
     [g] ガンマ調整モード ON/OFF（左右キーで変更）
     [G] ガンマリセット (0.80)
     [d] ダークフレーム取得（レンズキャップして押す、複数回で加算平均）
@@ -60,9 +60,16 @@ import numpy as np
 import piexif
 from PIL import Image, PngImagePlugin
 
+# pip版OpenCV(Qt)はフォント同梱が無くトラックバーの文字が描画されないため、システムフォントを指す
+if sys.platform.startswith("linux"):
+    for _font_dir in ("/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/truetype", "/usr/share/fonts"):
+        if os.path.isdir(_font_dir):
+            os.environ["QT_QPA_FONTDIR"] = _font_dir
+            break
+
 sys.path.append(os.path.join(os.path.dirname(__file__), "common"))
 from hist_overlay import draw_hist_ccdf_overlay
-from display_utils import clamp, draw_info_lines, fit_display_frame, get_screen_size
+from display_utils import clamp, decode_key, draw_info_lines, fit_display_frame, get_screen_size
 from raw_utils import (
     BAYER_MAP,
     apply_wire_format_preset,
@@ -785,36 +792,19 @@ class SettingsMenu:
 
         self.apply_requested = False
 
-        # キーの下位8bit（通常キー）
-        key = key_raw & 0xFF
+        key, nav = decode_key(key_raw)
 
-        # waitKeyExの矢印キー値（Windows）
-        if key_raw == 2490368:  # Up
+        if nav == "up":
             self.selected_item = (self.selected_item - 1) % len(self.settings)
             return True
-        elif key_raw == 2621440:  # Down
+        elif nav == "down":
             self.selected_item = (self.selected_item + 1) % len(self.settings)
             return True
-        elif key_raw == 2424832:  # Left
+        elif nav == "left":
             self.change_value(-1)
             self.apply_requested = True
             return True
-        elif key_raw == 2555904:  # Right
-            self.change_value(1)
-            self.apply_requested = True
-            return True
-        # 互換用（環境差異）
-        elif key in [82, 65]:  # 上
-            self.selected_item = (self.selected_item - 1) % len(self.settings)
-            return True
-        elif key in [84, 66]:  # 下
-            self.selected_item = (self.selected_item + 1) % len(self.settings)
-            return True
-        elif key in [81, 68]:  # 左
-            self.change_value(-1)
-            self.apply_requested = True
-            return True
-        elif key in [83, 67]:  # 右
+        elif nav == "right":
             self.change_value(1)
             self.apply_requested = True
             return True
@@ -1475,11 +1465,13 @@ def run_raw_live_stack(args):
         def gamma_to_slider(g):
             return int(g * 100)
 
-        cv2.namedWindow(WB_WINDOW_NAME, cv2.WINDOW_NORMAL)
+        # Qt版OpenCVはツールバー/ステータスバーが付いてレイアウトが崩れるため GUI_NORMAL で省略
+        cv2.namedWindow(WB_WINDOW_NAME, cv2.WINDOW_NORMAL | cv2.WINDOW_GUI_NORMAL)
         cv2.createTrackbar("B x100", WB_WINDOW_NAME, 100, 400, lambda _v: None)
         cv2.createTrackbar("G x100", WB_WINDOW_NAME, 100, 400, lambda _v: None)
         cv2.createTrackbar("R x100", WB_WINDOW_NAME, 100, 400, lambda _v: None)
         cv2.createTrackbar("Gamma x100", WB_WINDOW_NAME, 80, 400, lambda _v: None)
+        cv2.resizeWindow(WB_WINDOW_NAME, 420, 120)
         if args.wb_b is not None:
             cv2.setTrackbarPos("B x100", WB_WINDOW_NAME, gain_to_slider(args.wb_b))
         if args.wb_g is not None:
@@ -1534,9 +1526,9 @@ def run_raw_live_stack(args):
         print("       [n]次候補フォーマット  [+/-]skip±1行  [a]ストレッチ切替  [A]位置合わせ切替  [E]ダーク減算切替  [b]Bayer切替")
         print("       [o]停止判定モード切替（超過フレームを含む/含まない）")
         print("       [h]左右反転  [v]上下反転  [H]ヒストグラム切替  [t]LiveStack ON/OFF  [R]LiveStackリセット")
-        print("       [w]白点クリックWB  [W]WBリセット  [g]ガンマ調整モード  [G]ガンマリセット")
+        print("       [w]白点クリックWB  [W]/[u]WBリセット(Qt版OpenCVはShift不可のため[u])  [g]ガンマ調整モード  [G]ガンマリセット")
         print("       [d]ダークフレーム取得（レンズキャップして押す）  [D]ダーククリア")
-        print("       [S]SER録画開始/停止トグル")
+        print("       [S]/[x]SER録画開始/停止トグル（Linux/Qt版OpenCVではShiftが効かないため[x]を使用）")
         if ser_reader is not None:
             print("       [space]一時停止/再生  [,][.]コマ戻し/送り  [[][]]先頭/末尾へ  [l]ループ切替")
 
@@ -1725,7 +1717,7 @@ def run_raw_live_stack(args):
             wb_gains[1] = slider_to_gain(max(10, cv2.getTrackbarPos("G x100", WB_WINDOW_NAME)))
             wb_gains[2] = slider_to_gain(max(10, cv2.getTrackbarPos("R x100", WB_WINDOW_NAME)))
             gamma_value = slider_to_gamma(max(10, cv2.getTrackbarPos("Gamma x100", WB_WINDOW_NAME)))
-            wb_info = np.zeros((28, 400, 3), dtype=np.uint8)
+            wb_info = np.zeros((28, 420, 3), dtype=np.uint8)
             cv2.putText(wb_info,
                 f"B:{wb_gains[0]:.2f}  G:{wb_gains[1]:.2f}  R:{wb_gains[2]:.2f}  Gamma:{gamma_value:.2f}  click:{'ON' if click_wb_mode else 'OFF'}",
                 (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
@@ -1918,7 +1910,7 @@ def run_raw_live_stack(args):
                 _ser_next_t = max(_ser_next_t + _ser_interval, time.perf_counter())
             else:
                 key_raw = cv2.waitKeyEx(1)
-            key = key_raw & 0xFF
+            key, nav = decode_key(key_raw)
 
             # 設定メニュー優先
             if settings_menu.handle_key(key_raw):
@@ -1963,7 +1955,7 @@ def run_raw_live_stack(args):
             elif key == ord("w"):
                 click_wb_mode = not click_wb_mode
                 print(f"[wb] 白点クリックWB: {'ON' if click_wb_mode else 'OFF'}")
-            elif key == ord("W"):
+            elif key in (ord("W"), ord("u")):
                 wb_gains[:] = [1.0, 1.0, 1.0]
                 cv2.setTrackbarPos("B x100", WB_WINDOW_NAME, 100)
                 cv2.setTrackbarPos("G x100", WB_WINDOW_NAME, 100)
@@ -1976,11 +1968,11 @@ def run_raw_live_stack(args):
                 gamma_value = 0.80
                 cv2.setTrackbarPos("Gamma x100", WB_WINDOW_NAME, gamma_to_slider(gamma_value))
                 print("[gamma] リセット (0.80)")
-            elif gamma_adjust_mode and key_raw in (81, 2424832):  # 左キー
+            elif gamma_adjust_mode and nav == "left":  # 左キー
                 gamma_value = max(0.10, round(gamma_value - 0.05, 2))
                 cv2.setTrackbarPos("Gamma x100", WB_WINDOW_NAME, gamma_to_slider(gamma_value))
                 print(f"[gamma] {gamma_value:.2f}")
-            elif gamma_adjust_mode and key_raw in (83, 2555904):  # 右キー
+            elif gamma_adjust_mode and nav == "right":  # 右キー
                 gamma_value = min(4.00, round(gamma_value + 0.05, 2))
                 cv2.setTrackbarPos("Gamma x100", WB_WINDOW_NAME, gamma_to_slider(gamma_value))
                 print(f"[gamma] {gamma_value:.2f}")
@@ -2066,7 +2058,7 @@ def run_raw_live_stack(args):
                 pil_img = Image.fromarray(cv2.cvtColor(jpg_frame, cv2.COLOR_BGR2RGB))
                 pil_img.save(fname, "JPEG", quality=95, exif=exif_bytes)
                 print(f"[save] JPEG: {fname}  (WB/Gamma適用後, フルサイズ, EXIF付き)")
-            elif key == ord("S"):
+            elif key in (ord("S"), ord("x")):
                 if not _ser_recording:
                     # --- 録画開始 ---
                     import struct
@@ -2269,9 +2261,9 @@ def run_raw_live_stack(args):
                     frame_bytes = ser_reader.read_at(ser_reader.position - 2)
                     do_stack_reset()
                 _frame_fresh = True
-            elif ser_reader is not None and (key in (ord("["), ord("]")) or key_raw in (2359296, 2293760)):  # Home/End
+            elif ser_reader is not None and (key in (ord("["), ord("]")) or nav in ("home", "end")):  # Home/End
                 ser_paused = True
-                to_first = key == ord("[") or key_raw == 2359296
+                to_first = key == ord("[") or nav == "home"
                 frame_bytes = ser_reader.read_at(0 if to_first else ser_reader.frame_count - 1)
                 do_stack_reset()
                 _frame_fresh = True
@@ -2301,6 +2293,7 @@ def run_raw_live_stack(args):
 
             frame_bytes = bytes(buf[:total_size])
             buf = buf[total_size:]
+            _frame_fresh = True
 
     except ConnectionError as e:
         print(f"\n[切断] {e}")

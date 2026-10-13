@@ -64,3 +64,35 @@ def draw_info_lines(img, lines, font_scale=0.60, color=(0, 255, 0), thickness=2)
 
 def clamp(value, low, high):
     return max(low, min(high, value))
+
+
+# waitKeyEx の特殊キー値 → ナビゲーション名
+# Windows / Linux(GTK: X11 keysym 0xFF5x, 上位bitは修飾キー状態) / Qt(0x010000xx)
+_NAV_KEYS = {
+    2359296: "home", 2293760: "end",
+    2424832: "left", 2490368: "up", 2555904: "right", 2621440: "down",
+}
+_NAV_KEYSYMS = {
+    0xFF50: "home", 0xFF57: "end",
+    0xFF51: "left", 0xFF52: "up", 0xFF53: "right", 0xFF54: "down",
+}
+_NAV_QT = {
+    0x01000010: "home", 0x01000011: "end",
+    0x01000012: "left", 0x01000013: "up", 0x01000014: "right", 0x01000015: "down",
+}
+
+
+def decode_key(key_raw):
+    """waitKeyEx の戻り値を (通常キーコード, ナビゲーション名) に分解する。
+
+    矢印キー等はナビゲーション名のみ返し、通常キーコードは -1 にする
+    （Linux では矢印キーの下位8bitが 'Q'/'R'/'S'/'T' と衝突するため）。
+    """
+    if key_raw < 0:
+        return -1, None
+    nav = _NAV_KEYS.get(key_raw) or _NAV_QT.get(key_raw) or _NAV_KEYSYMS.get(key_raw & 0xFFFF)
+    if nav:
+        return -1, nav
+    if (key_raw & 0xFFFF) >= 0x100:
+        return -1, None
+    return key_raw & 0xFF, None
