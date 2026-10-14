@@ -997,7 +997,10 @@ def _ssh_start_rpicam(ssh_host, ssh_user, ssh_key, rpicam_cmd, port):
     import paramiko
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(ssh_host, username=ssh_user, key_filename=os.path.expanduser(ssh_key))
+    key_path = os.path.expanduser(ssh_key)
+    # look_for_keys=Trueのままだと指定鍵が拒否された際に~/.ssh/id_rsa等を自動探索し、
+    # 暗号化鍵に当たってPasswordRequiredExceptionになるため無効化する
+    client.connect(ssh_host, username=ssh_user, key_filename=key_path, look_for_keys=False)
 
     cmd = rpicam_cmd.strip()
     if "--listen" not in cmd:
