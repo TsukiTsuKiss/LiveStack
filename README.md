@@ -214,32 +214,41 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 **SSH連携のセットアップ（初回のみ）:**
 接続は鍵認証のみです（パスワード認証は使えません）。パスワードで手入力のSSHができても、鍵を作って登録するまではこのアプリから接続できません。
 
-1. PCで鍵を作る（パスフレーズは空。アプリから自動で使うため）:
+1. 既存の鍵がないか確認する（あれば手順2は実行しない。上書きすると古い鍵が使えなくなる）:
    ```bash
-   ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
+   ls ~/.ssh/id_rsa ~/.ssh/id_rsa.pub
    ```
-2. 公開鍵をPiに登録する（パスワードを1回聞かれる）:
+2. PCで鍵を作る（アプリの既定値 `~/.ssh/id_rsa` になる。パスフレーズは空にする。アプリから自動で使うため）:
    ```bash
-   ssh-copy-id -i ~/.ssh/id_ed25519.pub <ユーザー名>@<PiのIP>
+   ssh-keygen -t rsa -b 4096 -N "" -f ~/.ssh/id_rsa
    ```
-3. パスワードなしで入れることを確認する:
+3. 公開鍵をPiに登録する（パスワードを1回聞かれる）:
    ```bash
-   ssh <ユーザー名>@<PiのIP> echo ok
+   ssh-copy-id -i ~/.ssh/id_rsa.pub <ユーザー名>@<PiのIP>
    ```
-4. JSON（またはオプション）に設定する:
+   Windows には標準で `ssh-copy-id` がないため、PowerShell では次のようにする:
+   ```powershell
+   type $env:USERPROFILE\.ssh\id_rsa.pub | ssh <ユーザー名>@<PiのIP> "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys"
+   ```
+4. パスワードなしで入れることを確認する（`ok` と表示されれば成功）:
+   ```bash
+   ssh -i ~/.ssh/id_rsa <ユーザー名>@<PiのIP> echo ok
+   ```
+5. JSON（またはオプション）に設定する:
    ```json
    "ssh_host": "192.168.1.14",
    "ssh_user": "<ユーザー名>",
-   "ssh_key": "~/.ssh/id_ed25519",
+   "ssh_key": "~/.ssh/id_rsa",
    "rpicam_cmd": "rpicam-raw --width 3840 --height 2160 --framerate 0.3 -t 0 --shutter 5000000 --gain 0 --nopreview"
    ```
-5. `python raw_live_stack.py --config` で起動する（`--source` は `ssh_host` から自動設定される）。
+6. `python raw_live_stack.py --config` で起動する（`--source` は `ssh_host` から自動設定される）。
 
 **つまずきやすい点:**
 - `ssh_key` には**秘密鍵**（`.pub` の付かないファイル）を指定する。`~/.ssh/known_hosts` は接続先の記録で鍵ではないため、`not a valid OPENSSH private key file` になる。
 - `ssh_host` が `null` のままだと、`rpicam_cmd` があってもSSHは使われず、手動起動済みのrpicam-rawへ接続しに行く。起動していなければ `Connection refused` になる。`[SSH]` の行が出ているかで見分けられる。
 - 手動でrpicam-rawを起動した場合は `--no-ssh` を付ける。
 - 起動に失敗したときはPi側の `/tmp/rpicam_raw.log` にrpicam-rawの出力が残る。
+- 鍵の種類は自由（`ed25519` なら `ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519` で作り、`ssh_key` を `~/.ssh/id_ed25519` にする）。Pi側のOpenSSHがRSAを受け付けない設定の場合は `ed25519` を使う。ファイル名の違いだけで、置き場所（Windowsも `~/.ssh/`）は同じ。
 - 鍵ファイルの中身（秘密鍵）は公開しない。リポジトリには入れない（`~/.ssh` はリポジトリの外）。`ssh_key` のパス文字列だけなら公開して問題ない。
 
 **ズームフォーカスアシストオプション（CLIまたはJSONで指定）:**
@@ -466,6 +475,9 @@ pip install -r requirements.txt
 ```
 
 ## 変更履歴
+
+#### 2026/10/14 SSH連携の鍵手順を id_rsa（既定値）に合わせて修正
+- セットアップ手順を `ssh-keygen -t rsa -b 4096 -N "" -f ~/.ssh/id_rsa` に変更（既存鍵の確認、Windowsでの公開鍵登録、ed25519を使う場合の注記を追加）。
 
 #### 2026/10/14 SSH連携のセットアップ手順を追記
 - 鍵の作成・Piへの登録・確認・設定の手順と、つまずきやすい点（`ssh_key` に `known_hosts` を指定、`ssh_host` が `null`、`--no-ssh`）を「SSH連携のセットアップ」に追記。
