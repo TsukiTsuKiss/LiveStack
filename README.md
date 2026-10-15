@@ -64,6 +64,7 @@ camera-live/
 python demo/make_demo.py --ser 20261013_225204.ser                 # 全シーン
 python demo/make_demo.py --ser xxx.ser --scenes live,menu           # シーンを指定
 python demo/make_demo.py --ser xxx.ser --mp4                        # ffmpegでmp4(H.264, crf18)も作る
+python demo/make_demo.py --ser xxx.ser --wb 1.6,1.0,1.4             # ホワイトバランス B,G,R（デフォルトは1.0,1.0,1.0=なし）
 ```
 
 | シーン | 内容 |

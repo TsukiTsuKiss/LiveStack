@@ -9,6 +9,7 @@ raw_live_stack.py にキー操作を自動で送り、アプリ自身の画面�
   python demo/make_demo.py --ser 20261013_225204.ser            # 全シーン
   python demo/make_demo.py --ser xxx.ser --scenes live,menu      # シーンを指定
   python demo/make_demo.py --ser xxx.ser --mp4                   # ffmpegでmp4(H.264)も作る
+  python demo/make_demo.py --ser xxx.ser --wb 1.6,1.0,1.4        # ホワイトバランス B,G,R（既定は1.0,1.0,1.0=なし）
 
 出力: demo/out/<シーン名>.avi（--mp4 指定時は .mp4 も）。保存系の操作で作られる画像・SERは一時ディレクトリに出して削除する。
 """
@@ -82,10 +83,10 @@ def scene_live(tl):
     tl.press("h", "[h] Flip horizontal OFF", 1.5)
     tl.press("v", "[v] Flip vertical", 2.0)
     tl.press("v", "[v] Flip vertical OFF", 1.5)
-    tl.press("b", "[b] Bayer pattern cycle (BGGR -> ...)", 1.5)
+    tl.press("b", "[b] Bayer pattern cycle (colors change)", 1.5)
     tl.press("b", None, 1.5)
     tl.press("b", None, 1.5)
-    tl.press("b", "Back to BGGR", 2.0)
+    tl.press("b", "Back to the original Bayer pattern", 2.0)
 
 
 def scene_menu(tl):
@@ -173,7 +174,7 @@ def scene_control(tl):
 
 def scene_player(tl):
     tl.cap("SER player (record now, process later)", 3.0)
-    tl.press("t", "[t] Stack ON", 3.0)  # 31フレームのループ(8fpsで約3.9秒)が一周する前に止める
+    tl.press("t", "[t] Stack ON", 3.0)  # SERの1周(8fpsで数秒)が終わる前に止める
     tl.press(" ", "[Space] Pause", 2.5)
     tl.repeat(".", 3, "[.] Step forward", gap=0.8, hold=1.2)
     tl.repeat(",", 2, "[,] Step back (stack resets)", gap=0.8, hold=1.2)
@@ -218,7 +219,7 @@ def write_pedestal_dark(ser_path, path):
     return level
 
 
-def run_child(scene_key, ser_path):
+def run_child(scene_key, ser_path, wb):
     """子プロセス側: アプリにキー操作を注入して画面録画する。"""
     import runpy
     import time
@@ -276,7 +277,7 @@ def run_child(scene_key, ser_path):
     os.symlink(ser_path, shown)
     sys.argv = ["raw_live_stack.py", "--source", shown, "--ser-fps", "8", "--stop-threshold", "2048",
                 "--dark-file", "demo_dark.fits",
-                "--wb-b", "2.6", "--wb-g", "1.0", "--wb-r", "1.23"] + extra  # imx585.json と同じWB
+                "--wb-b", wb[0], "--wb-g", wb[1], "--wb-r", wb[2]] + extra
     runpy.run_path(os.path.join(ROOT, "raw_live_stack.py"), run_name="__main__")
 
 
@@ -285,12 +286,16 @@ def main():
     parser.add_argument("--ser", required=True, help="再生するSERファイル")
     parser.add_argument("--scenes", default=",".join(SCENES), help=f"カンマ区切り: {','.join(SCENES)}")
     parser.add_argument("--mp4", action="store_true", help="ffmpegでmp4(H.264)も作る")
+    parser.add_argument("--wb", default="1.0,1.0,1.0", help="ホワイトバランスのゲイン B,G,R (デフォルト: 1.0,1.0,1.0=なし)")
     parser.add_argument("--child", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     ser_path = os.path.abspath(args.ser)
+    wb = [v.strip() for v in args.wb.split(",")]
+    if len(wb) != 3:
+        parser.error("--wb は B,G,R の3値をカンマ区切りで指定してください")
     if args.child:
-        run_child(args.child, ser_path)
+        run_child(args.child, ser_path, wb)
         return
 
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -301,7 +306,7 @@ def main():
         print(f"=== {name} ===", flush=True)
         work = tempfile.mkdtemp(prefix="livestack_demo_")
         try:
-            subprocess.run([sys.executable, os.path.abspath(__file__), "--ser", ser_path, "--child", key],
+            subprocess.run([sys.executable, os.path.abspath(__file__), "--ser", ser_path, "--wb", args.wb, "--child", key],
                            cwd=work, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             avis = sorted(glob.glob(os.path.join(work, "*_screen.avi")))
             if not avis:
