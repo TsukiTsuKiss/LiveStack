@@ -10,6 +10,7 @@ raw_live_stack.py にキー操作を自動で送り、アプリ自身の画面�
   python demo/make_demo.py --ser xxx.ser --scenes live,menu      # シーンを指定
   python demo/make_demo.py --ser xxx.ser --mp4                   # ffmpegでmp4(H.264)も作る
   python demo/make_demo.py --ser xxx.ser --wb 1.6,1.0,1.4        # ホワイトバランス B,G,R（既定は1.0,1.0,1.0=なし）
+  python demo/make_demo.py --ser xxx.ser --dark dark.fits        # 実ダークを使う（向きは自動判定。省略時は黒レベルだけの擬似ダーク）
 
 出力: demo/out/<シーン名>.avi（--mp4 指定時は .mp4 も）。保存系の操作で作られる画像・SERは一時ディレクトリに出して削除する。
 """
@@ -64,8 +65,8 @@ class Timeline:
 
 
 # 設定メニュー(m)の項目（ストリーム受信/SER再生時）
-S_THRESH, S_RATIO, S_MAXF, S_INFO, S_HIST, S_FLIPH, S_FLIPV, S_SERFLIP, S_ALIGNSZ, S_ALIGN, S_DARK, S_METHOD, S_STACK = range(13)
-S_N = 13
+S_THRESH, S_RATIO, S_MAXF, S_INFO, S_HIST, S_FLIPH, S_FLIPV, S_SERFLIP, S_ALIGNSZ, S_ALIGN, S_DARK, S_DARKFLIP, S_METHOD, S_STACK = range(14)
+S_N = 14
 # 操作メニュー(c)の項目
 C_PNG, C_JPEG, C_FITS, C_NPY, C_SER, C_SCR, C_ZOOM, C_CLICKWB, C_WBRESET, C_GAMMA, C_STACKRESET, C_DARKCAP, C_DARKCLR, C_JSON = range(14)
 C_N = 14
@@ -111,7 +112,9 @@ def scene_menu(tl):
     cur = tl.goto(cur, S_SERFLIP, S_N, "SER Flip: apply flip to SER recording (needs Flip H/V)")
     tl.press("RIGHT", "SER Flip ON  (inactive while Flip H/V are OFF)", 3.0)
     tl.press("RIGHT", "SER Flip OFF", 1.2)
-    cur = tl.goto(cur, S_METHOD, S_N, "Align / Dark Sub / Stack Method / Stack Mode", hold=0.3)
+    cur = tl.goto(cur, S_DARKFLIP, S_N, "Dark Flip: match the dark to a flipped SER (Auto detects it)")
+    tl.cap("Dark Flip: auto-detected from the hot pixels shared by the dark and the frames", 3.0)
+    cur = tl.goto(cur, S_METHOD, S_N, "Stack Method / Stack Mode", hold=0.3)
     tl.repeat("RIGHT", 1, "Stack Method: Lighten", hold=1.5)
     tl.repeat("RIGHT", 1, "Stack Method: Darken", hold=1.5)
     tl.repeat("RIGHT", 1, "Stack Method: Median", hold=1.5)
@@ -219,7 +222,7 @@ def write_pedestal_dark(ser_path, path):
     return level
 
 
-def run_child(scene_key, ser_path, wb):
+def run_child(scene_key, ser_path, wb, dark_path):
     """子プロセス側: アプリにキー操作を注入して画面録画する。"""
     import runpy
     import time
@@ -271,13 +274,18 @@ def run_child(scene_key, ser_path, wb):
         return r
 
     cv2.waitKeyEx = wait_with_script
-    write_pedestal_dark(ser_path, "demo_dark.fits")
+    if dark_path:
+        shutil.copy(dark_path, "demo_dark.fits")  # 実ダーク（コピーを使うので元のファイルは書き換えない）
+        dark_args = ["--dark-flip", "auto"]
+    else:
+        write_pedestal_dark(ser_path, "demo_dark.fits")
+        dark_args = []
     # 画面に出るパスをファイル名だけにする（ホームディレクトリ名などを動画に映さない）
     shown = os.path.basename(ser_path)
     os.symlink(ser_path, shown)
     sys.argv = ["raw_live_stack.py", "--source", shown, "--ser-fps", "8", "--stop-threshold", "2048",
                 "--dark-file", "demo_dark.fits",
-                "--wb-b", wb[0], "--wb-g", wb[1], "--wb-r", wb[2]] + extra
+                "--wb-b", wb[0], "--wb-g", wb[1], "--wb-r", wb[2]] + dark_args + extra
     runpy.run_path(os.path.join(ROOT, "raw_live_stack.py"), run_name="__main__")
 
 
@@ -286,6 +294,7 @@ def main():
     parser.add_argument("--ser", required=True, help="再生するSERファイル")
     parser.add_argument("--scenes", default=",".join(SCENES), help=f"カンマ区切り: {','.join(SCENES)}")
     parser.add_argument("--mp4", action="store_true", help="ffmpegでmp4(H.264)も作る")
+    parser.add_argument("--dark", help="実ダークのFITS (例: dark.fits)。向きは --dark-flip auto で自動判定する。省略時は黒レベルだけの擬似ダーク")
     parser.add_argument("--wb", default="1.0,1.0,1.0", help="ホワイトバランスのゲイン B,G,R (デフォルト: 1.0,1.0,1.0=なし)")
     parser.add_argument("--child", help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -294,8 +303,11 @@ def main():
     wb = [v.strip() for v in args.wb.split(",")]
     if len(wb) != 3:
         parser.error("--wb は B,G,R の3値をカンマ区切りで指定してください")
+    dark_path = os.path.abspath(args.dark) if args.dark else None
+    if dark_path and not os.path.exists(dark_path):
+        parser.error(f"ダークが見つかりません: {args.dark}")
     if args.child:
-        run_child(args.child, ser_path, wb)
+        run_child(args.child, ser_path, wb, dark_path)
         return
 
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -306,7 +318,7 @@ def main():
         print(f"=== {name} ===", flush=True)
         work = tempfile.mkdtemp(prefix="livestack_demo_")
         try:
-            subprocess.run([sys.executable, os.path.abspath(__file__), "--ser", ser_path, "--wb", args.wb, "--child", key],
+            subprocess.run([sys.executable, os.path.abspath(__file__), "--ser", ser_path, "--wb", args.wb] + (["--dark", dark_path] if dark_path else []) + ["--child", key],
                            cwd=work, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             avis = sorted(glob.glob(os.path.join(work, "*_screen.avi")))
             if not avis:

@@ -99,6 +99,8 @@ WB_WINDOW_NAME = "RAW Stack WB"
 # スタック方式: 内部名 <-> メニュー表示名
 STACK_METHOD_LABELS = {"sum": "Sum", "lighten": "Lighten", "darken": "Darken", "median": "Median", "sigma": "Sigma Clip", "sigmasum": "Sigma Sum"}
 STACK_LABEL_TO_METHOD = {v: k for k, v in STACK_METHOD_LABELS.items()}
+DARK_FLIP_LABELS = {"none": "None", "h": "H", "v": "V", "hv": "HV", "auto": "Auto"}
+DARK_FLIP_LABEL_TO_MODE = {v: k for k, v in DARK_FLIP_LABELS.items()}
 SER_LOOP_LABELS = {"reset": "ON（先頭でスタックをリセット）", "continuous": "ON（リセットしない・加算を続ける）", "off": "OFF"}
 ZOOM_WINDOW_NAME = "RAW Live Stack - Zoom"
 
@@ -253,7 +255,12 @@ class LiveStack:
         self.align_min_response = 0.05  # phaseCorrelateの応答がこれ未満なら検出失敗
         self.last_align_ms = 0.0  # 直近のずれ検出にかかった時間
         self.buffer_index = 0
-        self.dark_frame = None  # d キーで取得するまでは None（サイズを動的に合わせるため）
+        self.dark_frame = None  # d キーで取得するまでは None（サイズを動的に合わせるため）。常に取得時の向きのまま保持する
+        self.dark_flip = "none"  # none/h/v/hv: ダークを使うときだけ反転して、反転して録画したSER等の向きに合わせる
+        self.dark_dirty = False  # このセッションでダークを取得したか（終了時の自動保存の要否）
+        self._dark_eff = None  # 反転済みダークのキャッシュ
+        self._dark_eff_src = None  # キャッシュの元になったダーク（同一性で更新を判定する）
+        self._dark_eff_flip = None
         self.dark_enabled = True  # False: ダークがあっても減算・ホットピクセル補間をしない
         self.dark_buffer = []  # ダークフレーム用リングバッファ
         self.hot_sigma = 10.0  # ホットピクセル判定のしきい値(σ倍)。0以下で無効
@@ -482,8 +489,9 @@ class LiveStack:
         y0 = (h - sh) // 2 // 2 * 2
         x0 = (w - sw) // 2 // 2 * 2
         crop = raw16[y0:y0 + sh, x0:x0 + sw].astype(np.float32)
-        if self.dark_frame is not None and self.dark_enabled:
-            crop -= self.dark_frame[y0:y0 + sh, x0:x0 + sw]
+        dark = self.dark_eff
+        if dark is not None and self.dark_enabled:
+            crop -= dark[y0:y0 + sh, x0:x0 + sw]
         if self.dark_enabled and self._hot_mask is not None and self._hot_mask.shape == raw16.shape[:2]:
             crop[self._hot_mask[y0:y0 + sh, x0:x0 + sw]] = 0
         binned = crop.reshape(sh // 2, 2, sw // 2, 2).sum(axis=(1, 3))
@@ -575,8 +583,9 @@ class LiveStack:
 
         # 最新フレーム（raw16 Bayer float32）
         latest_f32 = self.buffer[latest_index].astype(np.float32)
-        if self.dark_frame is not None and self.dark_enabled:
-            latest_f32 = np.clip(latest_f32 - self.dark_frame, 0, None)
+        dark = self.dark_eff
+        if dark is not None and self.dark_enabled:
+            latest_f32 = np.clip(latest_f32 - dark, 0, None)
             self._fix_hot(latest_f32)
 
         if self.stack_method != "sum":
@@ -604,8 +613,8 @@ class LiveStack:
                 break
 
             past_f32 = past_raw16.astype(np.float32)
-            if self.dark_frame is not None and self.dark_enabled:
-                past_f32 = np.clip(past_f32 - self.dark_frame, 0, None)
+            if dark is not None and self.dark_enabled:
+                past_f32 = np.clip(past_f32 - dark, 0, None)
                 self._fix_hot(past_f32)
 
             past_pos = self.buffer_pos[past_index] or latest_pos
@@ -654,14 +663,15 @@ class LiveStack:
     def _iter_aligned(self, latest_index):
         """最新フレームを基準に位置合わせした過去フレームを、新しい順に返す（最新フレーム自身は含まない）。"""
         latest_pos = self.buffer_pos[latest_index] or (0.0, 0.0)
+        dark = self.dark_eff
         for i in range(self.max_frames - 1):
             past_index = (self.buffer_index - 2 - i + self.max_frames) % self.max_frames
             past_raw16 = self.buffer[past_index]
             if past_raw16 is None:
                 return
             past_f32 = past_raw16.astype(np.float32)
-            if self.dark_frame is not None and self.dark_enabled:
-                past_f32 = np.clip(past_f32 - self.dark_frame, 0, None)
+            if dark is not None and self.dark_enabled:
+                past_f32 = np.clip(past_f32 - dark, 0, None)
                 self._fix_hot(past_f32)
             past_pos = self.buffer_pos[past_index] or latest_pos
             dx = latest_pos[0] - past_pos[0]
@@ -756,11 +766,74 @@ class LiveStack:
         bayer8 = np.clip(stacked / scale, 0, 255).astype(np.uint8)
         return cv2.cvtColor(bayer8, bayer_code)
 
+    @staticmethod
+    def flip_array(arr, mode):
+        """2次元配列をmode(none/h/v/hv)で反転する（Bayerの色配列も同じ向きに反転する）。"""
+        if mode == "h":
+            return np.ascontiguousarray(arr[:, ::-1])
+        if mode == "v":
+            return np.ascontiguousarray(arr[::-1, :])
+        if mode == "hv":
+            return np.ascontiguousarray(arr[::-1, ::-1])
+        return arr
+
+    @property
+    def dark_eff(self):
+        """引き算・ホットピクセル検出に使うダーク（dark_flip を適用済み）。"""
+        d = self.dark_frame
+        if d is None or self.dark_flip == "none":
+            return d
+        if self._dark_eff_src is not d or self._dark_eff_flip != self.dark_flip:
+            self._dark_eff = self.flip_array(d, self.dark_flip)
+            self._dark_eff_src = d
+            self._dark_eff_flip = self.dark_flip
+        return self._dark_eff
+
+    def set_dark_flip(self, mode):
+        """ダークの反転を切り替え、ホットピクセルの索引を作り直す。"""
+        if mode != self.dark_flip:
+            self.dark_flip = mode
+            self.build_hot_mask()
+
+    @staticmethod
+    def _hot_candidates(a, k=8.0):
+        """同色面ごとの3x3メディアンとの差がロバストσのk倍を超える画素（ホットピクセル候補）のboolマスク。"""
+        out = np.zeros(a.shape, bool)
+        for oy in (0, 1):
+            for ox in (0, 1):
+                plane = np.ascontiguousarray(a[oy::2, ox::2], dtype=np.float32)
+                resid = plane - cv2.medianBlur(plane, 3)
+                med = float(np.median(resid))
+                sigma = max(1.4826 * float(np.median(np.abs(resid - med))), 0.5)
+                out[oy::2, ox::2] = resid > med + k * sigma
+        return out
+
+    def detect_dark_flip(self, raw16):
+        """生フレームとダークのホットピクセルの一致数から、ダークの反転(none/h/v/hv)を判定する。判定できなければNone。
+
+        ヘッダーのBAYER表記は終了時の自動保存などで書き換わることがあり当てにならないため、画素の一致で決める。
+        """
+        d = self.dark_frame
+        if d is None or raw16.shape != d.shape or d.shape[0] % 2 or d.shape[1] % 2:
+            return None
+        frame_hot = self._hot_candidates(raw16.astype(np.float32))
+        scores = {}
+        for mode in ("none", "h", "v", "hv"):
+            dark_hot = self._hot_candidates(self.flip_array(d, mode))
+            scores[mode] = int(np.count_nonzero(frame_hot & dark_hot))
+        ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+        best, second = ranked[0], ranked[1]
+        print(f"[dark] 向きの判定 (ホットピクセル一致数): {scores}")
+        # 偶然の一致より十分多いことを要求する（ダークのホットピクセルが少ないと判定できない）
+        if best[1] < 20 or best[1] < 3 * max(second[1], 1):
+            return None
+        return best[0]
+
     def build_hot_mask(self):
         """ダークから、同色近傍の中央値より突出した画素を求め、補間用の索引を作る。"""
         self._hot_fix = None
         self._hot_mask = None
-        d = self.dark_frame
+        d = self.dark_eff
         if d is None or self.hot_sigma <= 0:
             return
         h, w = d.shape
@@ -799,6 +872,15 @@ class LiveStack:
 
     def set_dark_frame(self, raw16_frame):
         """ダークフレームを加算平均して設定（raw16 uint16 Bayer入力）"""
+        if self.dark_flip != "none":
+            # 新しいフレームはストリームと同じ向きなので、反転して使っていた既存ダークは反転後の向きに焼き込んでから平均する
+            baked = {}
+            for b in self.dark_buffer:
+                if id(b) not in baked:  # 読み込み済みダークは同じ配列を複数回積んでいるため、1回だけ反転する
+                    baked[id(b)] = self.flip_array(b, self.dark_flip)
+            self.dark_buffer = [baked[id(b)] for b in self.dark_buffer]
+            self.dark_flip = "none"
+            print("[dark] 既存ダークに反転を焼き込んで、新しいフレームと平均します (Dark Flip: none)")
         if len(self.dark_buffer) >= self.max_frames:
             self.dark_buffer.pop(0)  # 古いフレームを削除
         self.dark_buffer.append(raw16_frame.astype(np.float32))
@@ -806,6 +888,7 @@ class LiveStack:
         # 加算平均を計算（raw16空間のまま保持）
         dark_sum = np.sum(self.dark_buffer, axis=0)
         self.dark_frame = dark_sum / len(self.dark_buffer)  # float32 raw16 Bayer
+        self.dark_dirty = True
         self.build_hot_mask()
         print(f"ダークフレームを更新しました。現在の平均化フレーム数: {len(self.dark_buffer)}")
 
@@ -1199,6 +1282,9 @@ def run_raw_live_stack(args):
                 print(f"[warn] --max-frames {args.max_frames} はメモリ見積もり上限を超えるため {max_frames} にクランプしました")
         live_stack = LiveStack(max_frames=max_frames, verbose=False, bits=effective_bits)
         live_stack.hot_sigma = args.hot_sigma
+        # auto は最初のフレームでホットピクセルの一致から向きを判定する（それまでは none）
+        _dark_flip_auto = [args.dark_flip == "auto"]
+        live_stack.dark_flip = args.dark_flip if args.dark_flip in ("h", "v", "hv") else "none"
         if _preloaded_dark is not None:
             live_stack.dark_frame = _preloaded_dark
             # dark_bufferにダミーを積んでDARK_CNTを保持する（終了時の再保存で枚数が失われないよう）
@@ -1231,7 +1317,7 @@ def run_raw_live_stack(args):
             ("Dark Clear", "D", None),
             ("Save Config JSON", "C", None),
         ])
-        stream_menu_names = {"Max Frames", "Stack Mode", "Info Display", "Histogram", "Flip H", "Flip V", "SER Flip", "Stack Method", "Stop Threshold", "Stop Ratio(%)", "Align Size(%)", "Align", "Dark Sub"}
+        stream_menu_names = {"Max Frames", "Stack Mode", "Info Display", "Histogram", "Flip H", "Flip V", "SER Flip", "Dark Flip", "Stack Method", "Stop Threshold", "Stop Ratio(%)", "Align Size(%)", "Align", "Dark Sub"}
         # Stop Threshold の範囲をビット深度に合わせて更新
         max_val = (1 << effective_bits) - 1
         for _s in settings_menu.settings:
@@ -1264,6 +1350,7 @@ def run_raw_live_stack(args):
             align_size_percent=int(round(live_stack.align_ratio * 100)),
             align_enabled=live_stack.align_enabled,
             dark_enabled=live_stack.dark_enabled,
+            dark_flip=DARK_FLIP_LABELS["auto" if _dark_flip_auto[0] else live_stack.dark_flip],
         )
 
         screen_size = get_screen_size()
@@ -1466,9 +1553,22 @@ def run_raw_live_stack(args):
                     raw16 = raw16[crop_y:crop_y + args.height, crop_x:crop_x + args.width]
                 raw16 = normalize_effective_raw16(raw16, fmt["bits"], effective_bits, effective_shift)
 
+                # Dark Flip: auto は最初のフレームで、ダークと生フレームのホットピクセルの一致から向きを決める
+                if _dark_flip_auto[0] and live_stack.dark_frame is not None:
+                    _dark_flip_auto[0] = False
+                    print("[dark] ダークの向きを判定中...")
+                    found = live_stack.detect_dark_flip(raw16)
+                    if found is None:
+                        print("[dark] ダークの向きを判定できませんでした（一致が不十分）。Dark Flip を手動で指定してください")
+                        found = "none"
+                    live_stack.set_dark_flip(found)
+                    do_stack_reset()
+                    settings_menu.set_value("Dark Flip", DARK_FLIP_LABELS[found])
+                    print(f"[dark] Dark Flip: {DARK_FLIP_LABELS[found]}")
+
                 # スタックOFFでもDark Sub ONならダーク減算後の映像を表示する（スタックONはスタック側で減算する）
                 view16 = raw16
-                dark = live_stack.dark_frame
+                dark = live_stack.dark_eff
                 if not stack_enabled and dark is not None and live_stack.dark_enabled and dark.shape == raw16.shape:
                     sub = np.clip(raw16.astype(np.float32) - dark, 0, None)
                     live_stack._fix_hot(sub)
@@ -1595,7 +1695,7 @@ def run_raw_live_stack(args):
                     f"WB B:{wb_gains[0]:.2f} G:{wb_gains[1]:.2f} R:{wb_gains[2]:.2f} | Gamma:{gamma_value:.2f} | click:{'ON' if click_wb_mode else 'OFF'}"
                 )
                 if live_stack.dark_frame is not None:
-                    lines.append(f"Dark: {'ON' if live_stack.dark_enabled else 'OFF'} ({len(live_stack.dark_buffer) or '読込'}枚)")
+                    lines.append(f"Dark: {'ON' if live_stack.dark_enabled else 'OFF'} ({len(live_stack.dark_buffer) or '読込'}枚)  flip:{DARK_FLIP_LABELS[live_stack.dark_flip]}")
                 if last_view16 is not None:
                     vmin = int(last_view16.min())
                     vmax = int(last_view16.max())
@@ -1821,6 +1921,16 @@ def run_raw_live_stack(args):
                         live_stack.dark_enabled = values["dark_enabled"]
                         do_stack_reset()
                         print(f"[dark] 減算: {'ON' if live_stack.dark_enabled else 'OFF'}")
+                    new_flip = DARK_FLIP_LABEL_TO_MODE.get(values["dark_flip"], "none")
+                    if new_flip == "auto":
+                        if not _dark_flip_auto[0]:
+                            _dark_flip_auto[0] = True  # 次のフレームで判定する
+                            print("[dark] Dark Flip: 次のフレームで向きを自動判定します")
+                    elif _dark_flip_auto[0] or new_flip != live_stack.dark_flip:
+                        _dark_flip_auto[0] = False
+                        live_stack.set_dark_flip(new_flip)
+                        do_stack_reset()
+                        print(f"[dark] Dark Flip: {DARK_FLIP_LABELS[new_flip]}")
                 continue
 
             if key == ord("q"):
@@ -1877,6 +1987,7 @@ def run_raw_live_stack(args):
                         align_size_percent=int(round(live_stack.align_ratio * 100)),
                         align_enabled=live_stack.align_enabled,
                         dark_enabled=live_stack.dark_enabled,
+                        dark_flip=DARK_FLIP_LABELS["auto" if _dark_flip_auto[0] else live_stack.dark_flip],
                     )
                     print("設定メニューを開きました")
                 else:
@@ -2101,11 +2212,16 @@ def run_raw_live_stack(args):
                 )
             elif key == ord("d") and last_raw16 is not None:
                 live_stack.set_dark_frame(last_raw16)
+                _dark_flip_auto[0] = False
+                settings_menu.set_value("Dark Flip", DARK_FLIP_LABELS["none"])
                 n = len(live_stack.dark_buffer)
                 print(f"[dark] ダークフレーム取得: {n}枚平均")
             elif key == ord("D"):
                 live_stack.dark_frame = None
                 live_stack.dark_buffer = []
+                live_stack.dark_flip = "none"
+                _dark_flip_auto[0] = False
+                settings_menu.set_value("Dark Flip", DARK_FLIP_LABELS["none"])
                 live_stack.build_hot_mask()
                 print("[dark] ダークフレームクリア")
             elif key == ord("C"):
@@ -2117,6 +2233,7 @@ def run_raw_live_stack(args):
                 args.no_align = not live_stack.align_enabled
                 args.stack_method = live_stack.stack_method
                 args.no_dark_sub = not live_stack.dark_enabled
+                args.dark_flip = "auto" if _dark_flip_auto[0] else live_stack.dark_flip
                 args.wb_b = round(float(wb_gains[0]), 3)
                 args.wb_g = round(float(wb_gains[1]), 3)
                 args.wb_r = round(float(wb_gains[2]), 3)
@@ -2214,9 +2331,10 @@ def run_raw_live_stack(args):
         _stack_stop.set()
         _stack_event.set()   # wait() をすぐに解除してスレッドを終了させる
         _stack_thread.join(timeout=5.0)
-        # ダークフレームの自動保存（[D]クリア後は dark_frame=None のため保存しない）
+        # ダークフレームの自動保存（このセッションで取得・更新したときだけ。読み込んだだけのダークは書き換えない。
+        # [D]クリア後は dark_frame=None のため保存しない）
         try:
-            if live_stack.dark_frame is not None:
+            if live_stack.dark_frame is not None and live_stack.dark_dirty:
                 _save_dark_fits(args.dark_file, live_stack.dark_frame,
                                 bayer_keys[bayer_idx], len(live_stack.dark_buffer))
         except Exception:
@@ -2283,6 +2401,8 @@ def build_arg_parser():
     parser.add_argument("--stack-method", type=str, default="sum", choices=list(STACK_METHOD_LABELS.keys()),
                         help="スタック方式 (デフォルト: sum)。sum=加算(飽和で停止)。lighten=比較明 / darken=比較暗 / median=中央値 / sigma=シグマクリップ平均 / sigmasum=シグマクリップ加算(平均×枚数) は最新 --max-frames 枚を使う。メニューの Stack Method でも切替可")
     parser.add_argument("--clip-sigma", type=float, default=2.5, help="--stack-method sigma の棄却しきい値(標準偏差の倍数, デフォルト: 2.5)")
+    parser.add_argument("--dark-flip", type=str, default="none", choices=list(DARK_FLIP_LABELS.keys()),
+                        help="ダークを使うときの反転 (デフォルト: none)。反転して録画したSER(--ser-flip)など、ダークと映像の向きが違うときに h/v/hv を指定する。auto は最初のフレームでホットピクセルの一致から向きを判定する。メニューの Dark Flip でも切替可")
     parser.add_argument("--no-align", action="store_true", help="位置合わせを無効化して単純加算 ([A]キー/メニューで切替可)")
     parser.add_argument("--no-dark-sub", action="store_true", help="ダーク減算とホットピクセル補間を無効化 ([E]キー/メニューで切替可)")
     parser.add_argument("--wb-b", type=float, default=None, help="初期WBゲイン B (デフォルト: 1.0)")
