@@ -170,7 +170,7 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - `f`: FITS保存（uint16、スタック平均値）
 - `r`: NPY保存（16bit RAW）
 
-保存ファイル名は `yyyymmdd_HHMMSS.拡張子`（ローカル時刻。SERは録画開始時刻）。UTCはファイル内に記録される（FITS: `DATE-OBS`、PNG: `DateTimeUTC`、JPEG: EXIF UserComment、SER: ヘッダー`DateTimeUTC`とトレーラー）。NPYには日時情報なし。- `h`: 左右反転 ON/OFF
+保存ファイル名は `yyyymmdd_HHMMSS.拡張子`（ローカル時刻。SERは録画開始時刻）。`raw_live_stack.py` では静止画・録画とも `--rec-dir`（既定 `recordings/`）以下に保存する。UTCはファイル内に記録される（FITS: `DATE-OBS`、PNG: `DateTimeUTC`、JPEG: EXIF UserComment、SER: ヘッダー`DateTimeUTC`とトレーラー）。NPYには日時情報なし。- `h`: 左右反転 ON/OFF
 - `v`: 上下反転 ON/OFF
 - `H`: ヒストグラム+CCDF ON/OFF
 - `a`: 自動ストレッチ ON/OFF
@@ -186,7 +186,7 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - `C`: 設定をJSONに保存（`--config` 指定時はそのパス、未指定時は `config.json`）
 - `c`: 操作メニュー開閉（上下キーで選択、Enterで実行、ESC/`c`で閉じる。左右キーは使わない）。画像保存（PNG/JPEG/FITS/NPY）、SER録画、画面録画、Zoom、白点クリックWB、WB/ガンマ/スタックのリセット、ダーク取得/クリア、JSON保存をメニューから実行できる（左右/上下反転は設定メニューの `Flip H`/`Flip V`）（Linuxで使えない大文字キーの代替）
 - `y`: 画面録画AVI開始/停止（info・ヒストグラム・各メニュー・ズームPiP等の表示込みでプレビューを `yyyymmdd_HHMMSS_screen.avi` に保存。MJPG、`--screen-fps` で指定、デフォルト15fps。録画中は左上に `SCR` 表示（録画映像には写らない）。SNS投稿用は `ffmpeg -i in.avi -c:v libx264 -pix_fmt yuv420p out.mp4` で変換）
-- `S` / `x`: SER録画開始/停止トグル
+- `S` / `x`: SER録画開始/停止トグル。`recordings/` 下の日時フォルダに `*_raw.ser`（カメラRAW）と `*_stack.ser`（スタック済み。スタックON中のみ）、使ったダーク・設定JSONを保存（`--no-rec-raw` / `--no-rec-stack` / `--no-rec-folder` で無効化可）
 - Linux の Qt 版 OpenCV では Shift が反映されないため、大文字キー（`S`/`W` 等）は使えない。`S` は `x`、`W` は `u` で代用する。`A`/`E`/`H` は設定メニューの `Align`/`Dark Sub`/`Histogram` から切替できる。他の大文字キー機能も `c` の操作メニューから実行できる
 - `z`: フォーカスアシストズーム ON/OFF（ON中にクリック/ドラッグで拡大エリアを選択）
 
@@ -194,7 +194,7 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - `--max-frames N`: リングバッファの最大フレーム数（デフォルト 100）。`--max-frames max`（または `0`）で、解像度と空きメモリから見積もった上限（空きメモリの50%）まで使う。メモリの大きいPCで長時間スタックしたいときに便利（例: 3840x2160で空き約120GBなら約1960フレーム）。JSON設定では `"max_frames": "max"` も可
 
 **SER反転オプション:**
-- `--ser-flip`: SER録画にも `--flip-h`/`--flip-v`（`[h]`/`[v]`）の状態を反映（録画開始時に固定、ColorIDも更新）。既定ではSERは生Bayerのまま反転しない。理由は `仕様.md` の「SER録画機能」を参照
+- `--ser-flip`: スタックSER（`*_stack.ser`）にも `--flip-h`/`--flip-v`（`[h]`/`[v]`）の状態を反映（録画開始時に固定、ColorIDも更新）。既定ではSERは生Bayerのまま反転しない。理由は `仕様.md` の「SER録画機能」を参照
 
 **SER入力テストモード（カメラ不要）:**
 - `--source file.ser`: `raw_live_stack.py` でSERファイルをループ再生して入力する。メニューやキー操作の確認用。幅・高さ・Bayerはヘッダーから取得（`--raw-width` / `--stride` / `--wire-format` / `--crop-*` / SSHは無視）
@@ -312,7 +312,8 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - **Info Display**: ON/OFF - 画面上の情報表示切り替え
 - **Histogram**: ON/OFF - ヒストグラム/CCDF表示の切り替え（`[H]`キーでも切替）。`raw_live_stack.py` のみ
 - **Flip H / Flip V**: ON/OFF - 左右/上下反転（`[h]`/`[v]`キーでも切替）。`raw_live_stack.py` のみ
-- **SER Flip**: ON/OFF - 左右/上下反転をSER録画にも反映する（`--ser-flip` と同じ。録画開始時に固定されるため次回の録画から有効）。画面側の `Flip H`/`Flip V` がONのときだけ効き、両方OFFのときはメニューに `inactive` と表示される。`raw_live_stack.py` のみ
+- **Rec Raw / Rec Stack / Rec Folder**: ON/OFF - `[x]` 録画でRAW SER・スタックSER・日時フォルダ（ダーク/JSONのコピー）を保存するか（`--no-rec-raw` / `--no-rec-stack` / `--no-rec-folder` と同じ。次回の録画開始から有効）。`raw_live_stack.py` のみ
+- **SER Flip**: ON/OFF - 左右/上下反転をスタックSERにだけ反映する（RAW SERは常に無反転）（`--ser-flip` と同じ。録画開始時に固定されるため次回の録画から有効）。画面側の `Flip H`/`Flip V` がONのときだけ効き、両方OFFのときはメニューに `inactive` と表示される。`raw_live_stack.py` のみ
 - **Stop Threshold**: 5～255（5刻み） - 「閾値を超えた画素」を判定する輝度しきい値
 - **Stop Ratio(%)**: 1～50（1刻み） - 停止条件となる割合
 - **Align Size(%)**: 10～100（10刻み） - 位置合わせ検出窓の大きさ（画像幅/高さに対する割合、デフォルト 50）。`raw_live_stack.py` のみ適用
@@ -477,6 +478,12 @@ pip install -r requirements.txt
 ```
 
 ## 変更履歴
+
+#### 2026/10/16 raw_live_stack.py: `[x]` 録画を「RAW SER＋スタックSER＋日時フォルダ」に変更
+- 静止画（PNG/JPEG/FITS/NPY）も `--rec-dir` 直下に日時名で保存（1ファイルなので日時フォルダは作らない）。
+- 録画1回ごとに、録画用フォルダ（`--rec-dir`、既定 `recordings/`。`.gitignore` に登録済み）の下に日時フォルダ（`yyyymmdd_HHMMSS/`）を作り、`yyyymmdd_HHMMSS_raw.ser`（カメラRAW・無反転。後処理用）と `yyyymmdd_HHMMSS_stack.ser`（スタック済みフレーム。すぐ公開する用。スタックON中のみ）の2本を保存。使ったダーク（`dark.fits`）と設定JSON（`--config`/`--meta` のファイル。未指定なら実効設定を `config.json` として保存）も同じフォルダに入れる。
+- `--no-rec-raw` / `--no-rec-stack` / `--no-rec-folder`（設定メニュー `Rec Raw` / `Rec Stack` / `Rec Folder`、config は `no_rec_raw` 等）で個別に無効化。`--no-rec-folder` では `--rec-dir` 直下に `*_raw.ser` / `*_stack.ser` だけを保存（ダーク・JSONはコピーしない）。
+- `--ser-flip` はスタックSERにのみ効く（RAW SERは常に無反転）ため、RAW SER＋ダークの組み合わせでは `Dark Flip` は不要。
 
 #### 2026/10/15 raw_live_stack.py: Dark Flip（ダークの向き合わせ）
 - **`--dark-flip none|h|v|hv|auto` / 設定メニュー `Dark Flip` 追加**: 反転して録画したSERに、元の向きで撮ったダークを合わせて引けるようにした。`auto` はホットピクセルの一致で向きを判定（実データで左右反転を1秒で判定、背景ノイズの標準偏差が約10〜20%低下。向き違いのままだと逆に増える）。

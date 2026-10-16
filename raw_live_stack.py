@@ -51,6 +51,7 @@ import datetime
 import json
 import os
 import re
+import shutil
 import socket
 import sys
 import threading
@@ -72,6 +73,7 @@ if sys.platform.startswith("linux"):
 sys.path.append(os.path.join(os.path.dirname(__file__), "common"))
 from hist_overlay import draw_hist_ccdf_overlay
 from display_utils import clamp, decode_key, draw_info_lines, fit_display_frame, get_screen_size
+from ser_writer import SerWriter
 from ui_menus import ControlMenu, ScreenRecorder, SettingsMenu, route_control_key, toggle_settings_menu
 from raw_utils import (
     BAYER_MAP,
@@ -1317,7 +1319,7 @@ def run_raw_live_stack(args):
             ("Dark Clear", "D", None),
             ("Save Config JSON", "C", None),
         ])
-        stream_menu_names = {"Max Frames", "Stack Mode", "Info Display", "Histogram", "Flip H", "Flip V", "SER Flip", "Dark Flip", "Stack Method", "Stop Threshold", "Stop Ratio(%)", "Align Size(%)", "Align", "Dark Sub"}
+        stream_menu_names = {"Max Frames", "Stack Mode", "Info Display", "Histogram", "Flip H", "Flip V", "SER Flip", "Rec Raw", "Rec Stack", "Rec Folder", "Dark Flip", "Stack Method", "Stop Threshold", "Stop Ratio(%)", "Align Size(%)", "Align", "Dark Sub"}
         # Stop Threshold の範囲をビット深度に合わせて更新
         max_val = (1 << effective_bits) - 1
         for _s in settings_menu.settings:
@@ -1344,6 +1346,9 @@ def run_raw_live_stack(args):
             flip_h=args.flip_h,
             flip_v=args.flip_v,
             ser_flip=args.ser_flip,
+            rec_raw=not args.no_rec_raw,
+            rec_stack=not args.no_rec_stack,
+            rec_folder=not args.no_rec_folder,
             size_label="N/A",
             stop_ratio_percent=int(live_stack.overflow_ratio_threshold * 100),
             stop_threshold=live_stack.brightness_threshold,
@@ -1473,12 +1478,13 @@ def run_raw_live_stack(args):
         # 画面録画（info/ヒストグラム/メニュー等のオーバーレイ込みのプレビューをAVIに保存）
         screen_rec = ScreenRecorder(args.screen_fps)
         _ser_recording = False
-        _ser_file = None       # 開くと BytesIO ではなく直接 open()
-        _ser_frame_count = 0
-        _ser_fname = ""
-        _ser_timestamps = []   # フレームごとの受信時刻 Ticks（トレーラー用）
-        _ser_flip_h = False    # 録画開始時点のフリップ状態を固定
+        _ser_raw = None        # カメラRAWのSER（後処理用。反転しない）
+        _ser_stack = None      # スタック済みフレームのSER（公開用。スタックON中のみ書く）
+        _ser_base = ""         # 出力ファイル名の前半（フォルダ有効時はフォルダ内のパス）
+        _ser_flip_h = False    # 録画開始時点のフリップ状態を固定（スタックSERのみ）
         _ser_flip_v = False
+        _ser_size = (0, 0)
+        _ser_want_stack = False
         # 画面上に一時表示する通知メッセージ: [(text, expire_time), ...]
         _hud_msgs = []
         if live_stack.dark_frame is not None:
@@ -1490,9 +1496,53 @@ def run_raw_live_stack(args):
         ser_loop_mode = args.ser_loop_mode  # reset: 先頭に戻るときスタックをリセット / continuous: リセットせず続ける / off: 末尾で停止
         _frame_fresh = True  # False: 同じフレームの再表示(一時停止中)
 
+        def _open_ser(suffix, bayer_key):
+            w_r, h_r = _ser_size
+            return SerWriter(
+                f"{_ser_base}_{suffix}.ser", w_r, h_r, bayer_key,
+                observer=getattr(args, "observer", None) or f"WB B:{wb_gains[0]:.2f} G:{wb_gains[1]:.2f} R:{wb_gains[2]:.2f} g:{gamma_value:.2f}",
+                instrument=getattr(args, "instrument", None) or f"rpicam-raw {args.wire_format or ''}",
+                telescope=getattr(args, "telescope", None) or f"stk={live_stack.stack_count} {effective_bits}bit {bayer_key}",
+            )
+
+        def _stack_ser_bayer_key():
+            return flip_bayer_key(bayer_keys[bayer_idx], _ser_flip_h, _ser_flip_v, *_ser_size)
+
+        def _copy_rec_extras(folder):
+            """後処理で再現できるよう、使ったダークと設定JSONを録画フォルダに置く。"""
+            if live_stack.dark_frame is not None and live_stack.dark_enabled:
+                dst = os.path.join(folder, os.path.basename(args.dark_file))
+                if not live_stack.dark_dirty and os.path.isfile(args.dark_file):
+                    shutil.copy2(args.dark_file, dst)
+                    print(f"[rec] ダークをコピー: {dst}")
+                else:
+                    _save_dark_fits(dst, live_stack.dark_frame, bayer_keys[bayer_idx], len(live_stack.dark_buffer))
+            used = [p for p in (args.config, getattr(args, "meta", None)) if p]
+            cfg_dir = os.path.dirname(os.path.abspath(args.config)) if args.config else ""
+            for p in used:
+                src = p if os.path.isfile(p) else os.path.join(cfg_dir, p)
+                if os.path.isfile(src):
+                    shutil.copy2(src, os.path.join(folder, os.path.basename(src)))
+                    print(f"[rec] 設定をコピー: {os.path.join(folder, os.path.basename(src))}")
+            if not args.config:
+                _save_config(os.path.join(folder, "config.json"), args)
+
+        def _close_ser_files(reason):
+            nonlocal _ser_raw, _ser_stack
+            for label, w in (("RAW", _ser_raw), ("STACK", _ser_stack)):
+                if w is not None:
+                    w.close()
+                    print(f"[SER] {reason}: {w.path}  {w.frame_count}フレーム ({label})")
+            _ser_raw = _ser_stack = None
+
         def _save_stem():
+            # 静止画(PNG/JPEG/FITS/NPY)は --rec-dir 直下に日時名で保存する（1ファイルなので日時フォルダは作らない）
             stem = f"{datetime.datetime.now():%Y%m%d_%H%M%S}"
-            return f"{stem}_f{ser_reader.position:04d}" if ser_reader is not None else stem
+            if ser_reader is not None:
+                stem = f"{stem}_f{ser_reader.position:04d}"
+            rec_root = args.rec_dir or "."
+            os.makedirs(rec_root, exist_ok=True)
+            return os.path.join(rec_root, stem)
 
         # --- バックグラウンドスタックスレッド ---
         _stack_event = threading.Event()   # 新フレーム追加を通知
@@ -1604,29 +1654,23 @@ def run_raw_live_stack(args):
                 live_stack.add_to_buffer(raw16, frame_count)
 
             # --- SER リアルタイム追記 ---
-            # スタックON: スタック加算値を書き込む / スタックOFF: 最新1フレームを書き込む
-            if _ser_recording and _ser_file is not None and _frame_fresh:
+            # RAW SER: 受信フレームをそのまま / スタックSER: スタックON中のスタック加算値（反転はスタックSERのみ）
+            if _ser_recording and _frame_fresh:
                 shift = 0 if args.ser_lsb else (16 - effective_bits)  # LSB詰め or MSB詰め(上位詰め)
-                if stack_enabled and live_stack.stacked_raw16 is not None:
-                    ser_f32 = live_stack.stacked_raw16.astype(np.float32)
-                elif raw16 is not None:
-                    ser_f32 = raw16.astype(np.float32)
-                else:
-                    ser_f32 = None
-                if ser_f32 is not None:
-                    ser_u16 = (ser_f32 * (1 << shift)).clip(0, 65535).astype(np.uint16)
+                if _ser_raw is not None and raw16 is not None:
+                    _ser_raw.write_frame((raw16.astype(np.float32) * (1 << shift)).clip(0, 65535).astype(np.uint16))
+                if _ser_want_stack and stack_enabled and live_stack.stacked_raw16 is not None:
+                    if _ser_stack is None:
+                        _ser_stack = _open_ser("stack", _stack_ser_bayer_key())
+                        print(f"[SER] スタックSER開始: {_ser_stack.path}")
+                    ser_u16 = (live_stack.stacked_raw16.astype(np.float32) * (1 << shift)).clip(0, 65535).astype(np.uint16)
                     if _ser_flip_h and _ser_flip_v:
                         ser_u16 = cv2.flip(ser_u16, -1)
                     elif _ser_flip_h:
                         ser_u16 = cv2.flip(ser_u16, 1)
                     elif _ser_flip_v:
                         ser_u16 = cv2.flip(ser_u16, 0)
-                    _ser_file.write(ser_u16.tobytes())
-                # 受信時刻を .NET DateTime.Ticks (100ns単位) で記録
-                now_utc = datetime.datetime.utcnow()
-                ticks = int((now_utc - datetime.datetime(1, 1, 1)).total_seconds() * 10_000_000)
-                _ser_timestamps.append(ticks)
-                _ser_frame_count += 1
+                    _ser_stack.write_frame(ser_u16)
 
             _frame_fresh = False
 
@@ -1780,7 +1824,7 @@ def run_raw_live_stack(args):
             # --- REC インジケータ ---
             if _ser_recording:
                 cv2.circle(preview_frame, (preview_frame.shape[1] - 18, 18), 8, (0, 0, 220), -1)
-                cv2.putText(preview_frame, f"REC {_ser_frame_count}f",
+                cv2.putText(preview_frame, f"REC {(_ser_raw or _ser_stack).frame_count if (_ser_raw or _ser_stack) else 0}f",
                     (preview_frame.shape[1] - 100, 24),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 220), 1, cv2.LINE_AA)
 
@@ -1909,7 +1953,11 @@ def run_raw_live_stack(args):
                         print(f"上下反転: {'ON' if flip_v else 'OFF'}")
                     if values["ser_flip"] != bool(args.ser_flip):
                         args.ser_flip = values["ser_flip"]
-                        print(f"[SER] 反転を録画に反映: {'ON' if args.ser_flip else 'OFF'} (次回の録画開始から有効)")
+                        print(f"[SER] 反転をスタックSERに反映: {'ON' if args.ser_flip else 'OFF'} (次回の録画開始から有効)")
+                    for _key, _attr, _label in (("rec_raw", "no_rec_raw", "RAW SER"), ("rec_stack", "no_rec_stack", "スタックSER"), ("rec_folder", "no_rec_folder", "日時フォルダ")):
+                        if values[_key] == getattr(args, _attr):
+                            setattr(args, _attr, not values[_key])
+                            print(f"[SER] {_label}: {'ON' if values[_key] else 'OFF'} (次回の録画開始から有効)")
                     live_stack.overflow_ratio_threshold = max(0.01, min(0.50, values["stop_ratio_percent"] / 100.0))
                     live_stack.brightness_threshold = max(1, min((1 << live_stack.bits) - 1, values["stop_threshold"]))
                     live_stack.align_ratio = max(0.1, min(1.0, values["align_size_percent"] / 100.0))
@@ -1981,6 +2029,9 @@ def run_raw_live_stack(args):
                         flip_h=flip_h,
                         flip_v=flip_v,
                         ser_flip=args.ser_flip,
+                        rec_raw=not args.no_rec_raw,
+                        rec_stack=not args.no_rec_stack,
+                        rec_folder=not args.no_rec_folder,
                         size_label="N/A",
                         stop_ratio_percent=int(live_stack.overflow_ratio_threshold * 100),
                         stop_threshold=live_stack.brightness_threshold,
@@ -2057,52 +2108,39 @@ def run_raw_live_stack(args):
             elif key in (ord("S"), ord("x")):
                 if not _ser_recording:
                     # --- 録画開始 ---
-                    import struct
-                    # ColorID=BayerパターンID: SER Player互換（RGGB↔BGGR, GRBG↔GBRG を反転）
-                    color_id_map = {"RGGB": 11, "GRBG": 10, "GBRG": 9, "BGGR": 8}
-                    h_r = last_raw16.shape[0] if last_raw16 is not None else args.height
-                    w_r = last_raw16.shape[1] if last_raw16 is not None else args.width
-                    _ser_flip_h = bool(args.ser_flip and flip_h)
-                    _ser_flip_v = bool(args.ser_flip and flip_v)
-                    ser_bayer_key = flip_bayer_key(bayer_keys[bayer_idx], _ser_flip_h, _ser_flip_v, w_r, h_r)
-                    color_id = color_id_map.get(ser_bayer_key, 0)
-                    now_utc = datetime.datetime.utcnow()
-                    ticks = int((now_utc - datetime.datetime(1, 1, 1)).total_seconds() * 10_000_000)
-                    ticks_local = ticks + int(datetime.datetime.now().astimezone().utcoffset().total_seconds() * 10_000_000)
-                    header = (
-                        b"LUCAM-RECORDER"
-                        + struct.pack("<I", 0)
-                        + struct.pack("<I", color_id)    # ColorID: Bayerパターン (8-11)
-                        + struct.pack("<I", 0)            # LittleEndian: 0=SER Player互換 (フラグ意味が逆のため)
-                        + struct.pack("<I", w_r)
-                        + struct.pack("<I", h_r)
-                        + struct.pack("<I", 16)          # PixelDepthPerPlane: 16bit (C実装に合わせ固定)
-                        + struct.pack("<I", 0)   # フレーム数: 停止時にパッチ
-                        + (getattr(args, "observer", None) or f"WB B:{wb_gains[0]:.2f} G:{wb_gains[1]:.2f} R:{wb_gains[2]:.2f} g:{gamma_value:.2f}").encode()[:40].ljust(40, b"\x00")
-                        + (getattr(args, "instrument", None) or f"rpicam-raw {args.wire_format or ''}").encode()[:40].ljust(40, b"\x00")
-                        + (getattr(args, "telescope", None) or f"stk={live_stack.stack_count} {effective_bits}bit {ser_bayer_key}").encode()[:40].ljust(40, b"\x00")
-                        + struct.pack("<q", ticks_local)
-                        + struct.pack("<q", ticks)
-                    )
-                    _ser_fname = f"{datetime.datetime.now():%Y%m%d_%H%M%S}.ser"
-                    _ser_file = open(_ser_fname, "wb")
-                    _ser_file.write(header)
-                    _ser_frame_count = 0
-                    _ser_timestamps.clear()
-                    _ser_recording = True
-                    print(f"[SER] 録画開始: {_ser_fname}  {w_r}x{h_r} effective={effective_bits}bit (container={fmt['bits']}bit) {ser_bayer_key} (ColorID={color_id}) flip_h={_ser_flip_h} flip_v={_ser_flip_v}")
+                    want_raw = not args.no_rec_raw
+                    want_stack = not args.no_rec_stack
+                    if not (want_raw or want_stack):
+                        print("[SER] Rec Raw / Rec Stack がどちらも OFF のため録画しません")
+                        _hud_msgs.append(("[SER] Rec Raw/Stack が両方OFF", time.time() + 5))
+                    else:
+                        h_r = last_raw16.shape[0] if last_raw16 is not None else args.height
+                        w_r = last_raw16.shape[1] if last_raw16 is not None else args.width
+                        _ser_size = (w_r, h_r)
+                        _ser_flip_h = bool(args.ser_flip and flip_h)
+                        _ser_flip_v = bool(args.ser_flip and flip_v)
+                        _ser_want_stack = want_stack
+                        stem = f"{datetime.datetime.now():%Y%m%d_%H%M%S}"
+                        rec_root = args.rec_dir or "."
+                        if args.no_rec_folder:
+                            os.makedirs(rec_root, exist_ok=True)
+                            _ser_base = os.path.join(rec_root, stem)
+                        else:
+                            rec_folder_path = os.path.join(rec_root, stem)
+                            os.makedirs(rec_folder_path, exist_ok=True)
+                            _ser_base = os.path.join(rec_folder_path, stem)
+                            _copy_rec_extras(rec_folder_path)
+                        if want_raw:
+                            _ser_raw = _open_ser("raw", bayer_keys[bayer_idx])
+                        _ser_stack = None  # スタックONになったフレームで開く
+                        _ser_recording = True
+                        print(f"[SER] 録画開始: {_ser_base}_*.ser  {w_r}x{h_r} effective={effective_bits}bit (container={fmt['bits']}bit) RAW={'ON' if want_raw else 'OFF'} STACK={'ON' if want_stack else 'OFF'} (stack flip_h={_ser_flip_h} flip_v={_ser_flip_v})")
+                        if want_stack and not stack_enabled:
+                            print("[SER] スタックSERはスタックON(Stack Mode)の間だけ記録されます")
                 else:
                     # --- 録画停止: トレーラー書き込み + フレーム数パッチ ---
-                    import struct
-                    for ts in _ser_timestamps:
-                        _ser_file.write(struct.pack("<q", ts))
-                    _ser_file.seek(38)
-                    _ser_file.write(struct.pack("<I", _ser_frame_count))
-                    _ser_file.close()
-                    _ser_file = None
+                    _close_ser_files("録画停止")
                     _ser_recording = False
-                    _ser_timestamps.clear()
-                    print(f"[SER] 録画停止: {_ser_fname}  {_ser_frame_count}フレーム")
             elif key == ord("y"):
                 screen_rec.toggle(preview_frame)
             elif key == ord("r") and last_raw16 is not None:
@@ -2320,14 +2358,8 @@ def run_raw_live_stack(args):
         print("\n[終了]")
     finally:
         screen_rec.stop("終了につき保存")
-        if _ser_recording and _ser_file is not None:
-            import struct
-            for ts in _ser_timestamps:
-                _ser_file.write(struct.pack("<q", ts))
-            _ser_file.seek(38)
-            _ser_file.write(struct.pack("<I", _ser_frame_count))
-            _ser_file.close()
-            print(f"[SER] 終了につき録画保存: {_ser_fname}  {_ser_frame_count}フレーム")
+        if _ser_recording:
+            _close_ser_files("終了につき録画保存")
         _stack_stop.set()
         _stack_event.set()   # wait() をすぐに解除してスレッドを終了させる
         _stack_thread.join(timeout=5.0)
@@ -2385,7 +2417,11 @@ def build_arg_parser():
     parser.add_argument("--ser-loop-mode", type=str, default="reset", choices=list(SER_LOOP_LABELS.keys()),
                         help="SERファイル入力の末尾での動作 (デフォルト: reset)。reset=先頭に戻りスタックをリセット / continuous=リセットせず加算を続ける(フレーム不足でオーバーフローまで加算したいとき) / off=末尾で停止。[l]キーで切替")
     parser.add_argument("--ser-lsb", action="store_true", help="SER書き出し/読み込みを下位詰め(LSB-aligned)にする (デフォルト: 上位詰めMSB-aligned)")
-    parser.add_argument("--ser-flip", action="store_true", help="SER録画にも上下左右反転を反映する (録画開始時の状態で固定、ColorIDも反転後のBayerに更新)")
+    parser.add_argument("--ser-flip", action="store_true", help="スタックSERに上下左右反転を反映する (録画開始時の状態で固定、ColorIDも反転後のBayerに更新)。RAW SERは常に無反転")
+    parser.add_argument("--no-rec-raw", action="store_true", help="[X]録画でカメラRAWのSER(*_raw.ser)を保存しない (メニューの Rec Raw でも切替可)")
+    parser.add_argument("--no-rec-stack", action="store_true", help="[X]録画でスタック済みフレームのSER(*_stack.ser)を保存しない (スタックON時のみ保存。メニューの Rec Stack でも切替可)")
+    parser.add_argument("--rec-dir", type=str, default="recordings", help="[X]録画と静止画(PNG/JPEG/FITS/NPY)の出力先ルートフォルダ (デフォルト: recordings。.gitignore しやすいよう1段まとめる。\".\" でカレント)")
+    parser.add_argument("--no-rec-folder", action="store_true", help="[X]録画ごとの日時フォルダを作らず --rec-dir 直下にSERだけ保存する (日時フォルダにはSER・使用したダーク・設定JSONが入る。メニューの Rec Folder でも切替可)")
     parser.add_argument("--flip-h", action="store_true", help="左右反転して起動")
     parser.add_argument("--flip-v", action="store_true", help="上下反転して起動")
     parser.add_argument("--dark-file", type=str, default="dark.fits",

@@ -10,6 +10,9 @@
 *.mp4
 *.avi
 
+# 録画用フォルダ（[x]録画の出力先: SER・ダーク・設定JSONのコピー）
+recordings/
+
 # キャッシュファイル
 __pycache__/
 *.pyc

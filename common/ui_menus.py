@@ -102,6 +102,18 @@ class SettingsMenu:
                 "value": False
             },
             {
+                "name": "Rec Raw",
+                "value": True
+            },
+            {
+                "name": "Rec Stack",
+                "value": True
+            },
+            {
+                "name": "Rec Folder",
+                "value": True
+            },
+            {
                 "name": "Align Size(%)",
                 "value": 50,
                 "min": 10,
@@ -222,7 +234,7 @@ class SettingsMenu:
             new_value = setting["value"] + (direction * setting["step"])
             setting["value"] = max(setting["min"], min(setting["max"], new_value))
 
-        elif setting["name"] in ("Stack Mode", "Info Display", "Histogram", "Flip H", "Flip V", "SER Flip", "Align", "Dark Sub"):
+        elif setting["name"] in ("Stack Mode", "Info Display", "Histogram", "Flip H", "Flip V", "SER Flip", "Rec Raw", "Rec Stack", "Rec Folder", "Align", "Dark Sub"):
             setting["value"] = not setting["value"]
 
     def get_exposure_text(self, exposure_us):
@@ -272,11 +284,11 @@ class SettingsMenu:
                 value_text = setting["value"]
             elif setting["name"] == "SER Flip":
                 value_text = "ON" if setting["value"] else "OFF"
-                # SER録画の反転は画面側の反転(Flip H/V)がONのときだけ効く
+                # SER録画の反転はスタックSERにだけ効き、画面側の反転(Flip H/V)がONのときだけ有効（RAW SERは常に無反転）
                 flips = {t["name"]: t["value"] for t in self.settings if t["name"] in ("Flip H", "Flip V")}
                 if setting["value"] and flips and not any(flips.values()):
                     value_text += " (inactive: Flip H/V OFF)"
-            elif setting["name"] in ("Stack Mode", "Info Display", "Histogram", "Flip H", "Flip V", "Align", "Dark Sub"):
+            elif setting["name"] in ("Stack Mode", "Info Display", "Histogram", "Flip H", "Flip V", "Rec Raw", "Rec Stack", "Rec Folder", "Align", "Dark Sub"):
                 value_text = "ON" if setting["value"] else "OFF"
             elif setting["name"] in ("Stop Ratio(%)", "Align Size(%)"):
                 value_text = f"{int(setting['value'])}%"
@@ -315,6 +327,9 @@ class SettingsMenu:
             "flip_h": bool(values_by_name.get("Flip H", False)),
             "flip_v": bool(values_by_name.get("Flip V", False)),
             "ser_flip": bool(values_by_name.get("SER Flip", False)),
+            "rec_raw": bool(values_by_name.get("Rec Raw", True)),
+            "rec_stack": bool(values_by_name.get("Rec Stack", True)),
+            "rec_folder": bool(values_by_name.get("Rec Folder", True)),
             "stop_threshold": int(values_by_name.get("Stop Threshold", 255)),
             "stop_ratio_percent": int(values_by_name.get("Stop Ratio(%)", 10)),
             "align_size_percent": int(values_by_name.get("Align Size(%)", 50)),
@@ -322,7 +337,7 @@ class SettingsMenu:
             "dark_enabled": bool(values_by_name.get("Dark Sub", True)),
         }
 
-    def set_current_values(self, camera=0, gain=2.0, exposure=16667, max_frames=100, stack_mode=False, info_display=True, hist_display=True, flip_h=False, flip_v=False, ser_flip=False, stack_method="Sum", dark_flip="None", size_label="N/A", stop_ratio_percent=10, stop_threshold=255, align_size_percent=50, align_enabled=True, dark_enabled=True):
+    def set_current_values(self, camera=0, gain=2.0, exposure=16667, max_frames=100, stack_mode=False, info_display=True, hist_display=True, flip_h=False, flip_v=False, ser_flip=False, rec_raw=True, rec_stack=True, rec_folder=True, stack_method="Sum", dark_flip="None", size_label="N/A", stop_ratio_percent=10, stop_threshold=255, align_size_percent=50, align_enabled=True, dark_enabled=True):
         """現在の設定値を更新（キーワード指定で呼ぶこと）"""
         values = {
             "Camera": camera,
@@ -338,6 +353,9 @@ class SettingsMenu:
             "Flip H": bool(flip_h),
             "Flip V": bool(flip_v),
             "SER Flip": bool(ser_flip),
+            "Rec Raw": bool(rec_raw),
+            "Rec Stack": bool(rec_stack),
+            "Rec Folder": bool(rec_folder),
             "Stop Threshold": int(stop_threshold),
             "Stop Ratio(%)": int(stop_ratio_percent),
             "Align Size(%)": int(align_size_percent),
