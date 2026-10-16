@@ -26,6 +26,7 @@
 | バッテリー | HXJNLDC 3000mAh（PiSugar 2 付属の1200mAhは数時間しか持たず、交換） |
 | 筐体 | UVレジン方式の3Dプリンタで出力（円筒・リング・通気孔付きの円盤） |
 | 充電用ケーブル | microB → A に変換するだけの短いケーブル（充電しやすいように付けた） |
+| 変換リング | M48 → M42（T2）変換リング（M48側が筐体、M42側がHAC125DX付属アダプタに対応） |
 | 鏡筒 | Sky-Watcher HAC125DX（D=125mm、F=250mm、f/2.0） |
 
 ![組み立て済みのカメラ](docs/images/camera_assembled.jpg)
@@ -34,7 +35,24 @@
 
 ![HAC125DXの前面に取り付けた様子（フードは外している）](docs/images/camera_on_hac125dx.jpg)
 
+![赤道儀に設置したHAC125DX](docs/images/hac125dx_on_mount.jpg)
+
 **課題（メモ）:** カメラが長く、フードの先端からはみ出す。はみ出した部分に周囲の光が当たって迷光の原因になりうるため、フードの交換、または筐体の艶消し（塗装・植毛）を検討中。
+
+![フードの先端からはみ出したカメラ](docs/images/camera_protruding_from_hood.jpg)
+
+### 3Dデータ（筐体）
+
+筐体の3Dデータは [cad/](cad/) にあります（Autodesk Fusion のデータ `.f3d` と、造形用の `.stl`）。UVレジン方式の3Dプリンタで出力しています。
+
+| 部品 | ファイル名 | 内容 |
+|---|---|---|
+| 本体 | `Body_imx585` | カメラ取り付け部分（メイン部分）。基板取り付け面からマウント先端までの距離は13.5mm（センサー面からではない） |
+| 円筒カバー | `Cover` | 円筒状のカバー |
+| リヤキャップ | `RearCap` | 後ろ側のキャップ（カメラ用のネジ切り付き） |
+| 42mmキャップ | `42mm_Cap` | カメラ側のキャップ |
+| Pi Zero 2 W サポーター | `Pi_Zero2W_Supporter` | Raspberry Pi Zero 2 W を取り付けるサポーター |
+
 
 ---
 
@@ -79,6 +97,8 @@ camera-live/
 │   └── raw_utils.py      # RAW受信・デコード・WB/ガンマ共通処理
 ├── demo/
 │   └── make_demo.py      # デモ動画の自動生成（キー操作の自動入力 + 画面録画）
+├── cad/                  # 筐体の3Dデータ（Fusion .f3d + STL）
+├── docs/images/          # ハードウェア構成の写真
 └── README.md
 ```
 
