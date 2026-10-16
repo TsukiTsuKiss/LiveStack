@@ -139,6 +139,21 @@ def compute_white_ratio_uint8(frame_uint8, threshold):
     return float(white_pixels) / float(total_pixels)
 
 
+ROI_MIN_SIZE = 16        # ROIとして受け付ける最小の辺(raw px)
+ROI_ALIGN_MIN_SIZE = 256  # 位置合わせ窓の最小の辺(ROIがこれより小さいときはROIの中心で広げる)
+
+
+def normalize_roi(x0, y0, x1, y1, width, height):
+    """ROIをフレーム内に収め、Bayer配列を壊さないよう偶数座標に揃える。小さすぎるときはNone。"""
+    x0, x1 = sorted((int(x0), int(x1)))
+    y0, y1 = sorted((int(y0), int(y1)))
+    x0, y0 = max(0, x0) // 2 * 2, max(0, y0) // 2 * 2
+    x1, y1 = min(width, x1) // 2 * 2, min(height, y1) // 2 * 2
+    if x1 - x0 < ROI_MIN_SIZE or y1 - y0 < ROI_MIN_SIZE:
+        return None
+    return (x0, y0, x1, y1)
+
+
 def compute_white_ratio_native(frame_native, threshold_native):
     """ネイティブbit深度配列に対して P(X>=threshold) を計算する。"""
     if frame_native is None:
@@ -253,6 +268,7 @@ class LiveStack:
         self.align_max_jump = 10.0  # 予測位置からこれ以上外れた検出は異常値(raw px)
         self._hann = {}
         self.align_ratio = 0.5  # ずれ検出窓の大きさ（画像幅/高さに対する比率）
+        self.roi = None  # (x0,y0,x1,y1) raw px・偶数座標。停止判定と位置合わせの対象領域（None=全体/中央窓）
         self.align_enabled = True  # False: ずれ検出も移動もせず単純加算
         self.align_min_response = 0.05  # phaseCorrelateの応答がこれ未満なら検出失敗
         self.last_align_ms = 0.0  # 直近のずれ検出にかかった時間
@@ -485,11 +501,16 @@ class LiveStack:
     def _prepare_align_image(self, raw16):
         """中央の窓をダーク減算→2x2ビニング→背景除去して、ずれ検出用画像を作る。"""
         h, w = raw16.shape[:2]
-        sh = max(64, int(h * self.align_ratio)) // 2 * 2
-        sw = max(64, int(w * self.align_ratio)) // 2 * 2
-        sh, sw = min(sh, h // 2 * 2), min(sw, w // 2 * 2)
-        y0 = (h - sh) // 2 // 2 * 2
-        x0 = (w - sw) // 2 // 2 * 2
+        win = self.align_window(w, h)
+        if win is not None:
+            x0, y0 = win[0], win[1]
+            sw, sh = win[2] - win[0], win[3] - win[1]
+        else:
+            sh = max(64, int(h * self.align_ratio)) // 2 * 2
+            sw = max(64, int(w * self.align_ratio)) // 2 * 2
+            sh, sw = min(sh, h // 2 * 2), min(sw, w // 2 * 2)
+            y0 = (h - sh) // 2 // 2 * 2
+            x0 = (w - sw) // 2 // 2 * 2
         crop = raw16[y0:y0 + sh, x0:x0 + sw].astype(np.float32)
         dark = self.dark_eff
         if dark is not None and self.dark_enabled:
@@ -499,6 +520,31 @@ class LiveStack:
         binned = crop.reshape(sh // 2, 2, sw // 2, 2).sum(axis=(1, 3))
         binned = cv2.GaussianBlur(binned, (0, 0), 1.0)
         return binned - cv2.GaussianBlur(binned, (0, 0), 16)
+
+    def roi_text(self):
+        x0, y0, x1, y1 = self.roi
+        return f"x={x0} y={y0} {x1 - x0}x{y1 - y0}"
+
+    def align_window(self, w, h):
+        """ROIがあるときの位置合わせ窓(x0,y0,x1,y1)。ROIの中心を保ち、辺が小さければ ROI_ALIGN_MIN_SIZE まで広げる。
+        フレームからはみ出す分はずらして収める。ROIなし/不整合ならNone（呼び出し側で中央窓を使う）。"""
+        roi = self.roi
+        if roi is None or roi[2] > w or roi[3] > h:
+            return None
+        out = []
+        for lo, hi, size in ((roi[0], roi[2], w), (roi[1], roi[3], h)):
+            length = min(max(hi - lo, ROI_ALIGN_MIN_SIZE), size // 2 * 2)
+            start = (lo + hi - length) // 2
+            start = max(0, min(start, size - length)) // 2 * 2
+            out += [start, start + length]
+        return (out[0], out[2], out[1], out[3])
+
+    def roi_view(self, arr):
+        """停止判定用: ROIがあればその範囲(ビュー)、なければ全体を返す。"""
+        if self.roi is None:
+            return arr
+        x0, y0, x1, y1 = self.roi
+        return arr[y0:y1, x0:x1]
 
     def _detect_shift(self, prev, cur):
         """prev→curの移動量(dx,dy)をraw pxのfloat(サブピクセル)で返す。失敗時はNone。"""
@@ -629,7 +675,7 @@ class LiveStack:
 
             # オーバーフロー判定: CCDFと同じ計算（累積をネイティブ範囲にクリップして比較）
             overflow_ratio = float(np.mean(
-                np.clip(test_stack, 0.0, max_native) >= float(self.brightness_threshold)
+                np.clip(self.roi_view(test_stack), 0.0, max_native) >= float(self.brightness_threshold)
             ))
             last_overflow_ratio = overflow_ratio
             if overflow_ratio >= self.overflow_ratio_threshold:
@@ -739,7 +785,7 @@ class LiveStack:
                     break
                 if acc is not None:
                     test = acc + aligned
-                    last_ratio = float(np.mean(np.clip(test, 0.0, max_native) >= float(self.brightness_threshold)))
+                    last_ratio = float(np.mean(np.clip(self.roi_view(test), 0.0, max_native) >= float(self.brightness_threshold)))
                     if last_ratio >= self.overflow_ratio_threshold:
                         if self.include_overflow_frame:
                             frames[count] = aligned
@@ -1311,6 +1357,7 @@ def run_raw_live_stack(args):
             ("SER Rec", "S", "rec"),
             ("Screen Rec (AVI)", "y", "scr"),
             ("Zoom", "z", "zoom"),
+            ("ROI (select/clear)", "k", "roi"),
             ("Click WB", "w", "click_wb"),
             ("WB Reset", "W", None),
             ("Gamma Reset", "G", None),
@@ -1380,6 +1427,14 @@ def run_raw_live_stack(args):
         zoom_rect = [None]       # (px1, py1, px2, py2) プレビュー座標
         _zoom_from_drag = [False]   # True=ドラッグ選択、False=クリック選択
         _zoom_drag = {"start": None, "dragging": False, "current": None}
+        # ROI: 停止判定・位置合わせ・ヒストグラムの対象領域（Zoomとは別。座標はraw px・反転前）
+        roi_ui = {"select": False, "start": None, "current": None, "dragging": False}
+        if args.roi:
+            live_stack.roi = normalize_roi(args.roi[0], args.roi[1], args.roi[0] + args.roi[2], args.roi[1] + args.roi[3], args.width, args.height)
+            if live_stack.roi is None:
+                print(f"[roi] 設定のROI {args.roi} は無効(範囲外または小さすぎる)のため無視します")
+            else:
+                print(f"[roi] 読み込み: {live_stack.roi_text()}")
 
         def slider_to_gain(v):
             return v / 100.0
@@ -1411,7 +1466,45 @@ def run_raw_live_stack(args):
         if args.gamma is not None:
             cv2.setTrackbarPos("Gamma x100", WB_WINDOW_NAME, gamma_to_slider(args.gamma))
 
+        def _preview_to_raw(px, py):
+            pw, ph = preview_size_ref[0]
+            dw, dh = display_size_ref[0]
+            dx, dy = px * dw / max(1, pw), py * dh / max(1, ph)
+            return (dw - dx if flip_h else dx), (dh - dy if flip_v else dy)
+
+        def _apply_roi(roi):
+            live_stack.roi = roi
+            do_stack_reset()
+            if roi is None:
+                print("[roi] クリア（全体で判定・中央窓で位置合わせ）")
+                _hud_msgs.append(("[roi] クリア", time.time() + 4))
+            else:
+                print(f"[roi] 設定: {live_stack.roi_text()}")
+                _hud_msgs.append((f"[roi] {live_stack.roi_text()}", time.time() + 4))
+                if min(roi[2] - roi[0], roi[3] - roi[1]) < ROI_ALIGN_MIN_SIZE:
+                    print(f"[roi] 辺が{ROI_ALIGN_MIN_SIZE}px未満のため、位置合わせ窓はROIの中心で{ROI_ALIGN_MIN_SIZE}pxまで広げます（停止判定・ヒストグラムはROIそのもの）")
+
         def on_mouse(event, x, y, flags, param):
+            if roi_ui["select"]:
+                if event == cv2.EVENT_LBUTTONDOWN:
+                    roi_ui.update(start=(x, y), current=(x, y), dragging=True)
+                elif event == cv2.EVENT_MOUSEMOVE and roi_ui["dragging"]:
+                    roi_ui["current"] = (x, y)
+                elif event == cv2.EVENT_LBUTTONUP and roi_ui["dragging"]:
+                    x0, y0 = roi_ui["start"]
+                    roi_ui.update(dragging=False, select=False, start=None, current=None)
+                    if abs(x - x0) < 8 and abs(y - y0) < 8:
+                        print("[roi] 選択を取消（ドラッグで範囲を指定してください）")
+                        return
+                    ax, ay = _preview_to_raw(x0, y0)
+                    bx, by = _preview_to_raw(x, y)
+                    dw, dh = display_size_ref[0]
+                    roi = normalize_roi(ax, ay, bx, by, dw, dh)
+                    if roi is None:
+                        print(f"[roi] 小さすぎます（{ROI_MIN_SIZE}px以上）。もう一度 [k] で選択してください")
+                    else:
+                        _apply_roi(roi)
+                return
             if zoom_mode:
                 if event == cv2.EVENT_LBUTTONDOWN:
                     _zoom_drag["start"] = (x, y)
@@ -1449,12 +1542,13 @@ def run_raw_live_stack(args):
                 print(f"[wb] click ({sx},{sy}) -> B={wb_gains[0]:.2f} G={wb_gains[1]:.2f} R={wb_gains[2]:.2f}")
 
         display_frame_ref = [None]   # クリックWBのためにdisplay_frame参照を保持
+        display_size_ref = [(args.width, args.height)]  # 表示フレーム(=raw px)のサイズ。ROIの座標変換用
         preview_size_ref = [(disp_w, disp_h)]
         cv2.setMouseCallback(PREVIEW_WINDOW_NAME, on_mouse)
 
         print("\n操作: [q]終了  [m]設定メニュー  [i]情報表示  [s]PNG保存  [r]NPY保存  [f]FITS保存")
         print("       [n]次候補フォーマット  [+/-]skip±1行  [a]ストレッチ切替  [A]位置合わせ切替  [E]ダーク減算切替  [b]Bayer切替")
-        print("       [o]停止判定モード切替（超過フレームを含む/含まない）")
+        print("       [o]停止判定モード切替（超過フレームを含む/含まない）  [k]ROI指定/クリア（停止判定・位置合わせ・ヒストグラムの対象領域）")
         print("       [h]左右反転  [v]上下反転  [H]ヒストグラム切替  [t]LiveStack ON/OFF  [R]LiveStackリセット")
         print("       [w]白点クリックWB  [W]/[u]WBリセット(Qt版OpenCVはShift不可のため[u])  [g]ガンマ調整モード  [G]ガンマリセット")
         print("       [d]ダークフレーム取得（レンズキャップして押す）  [D]ダーククリア")
@@ -1701,12 +1795,23 @@ def run_raw_live_stack(args):
                 display_frame = cv2.flip(display_frame, 0)
 
             # Now表示とCCDF描画で同じ母集団を使うため、ここでネイティブ統計配列を1回だけ確定する。
+            def _stats_view(arr):
+                """統計用に間引いた配列。ROIがあればその範囲だけ（小さいROIは間引きを弱める）。"""
+                if arr is None:
+                    return None
+                step = 4
+                if live_stack.roi is not None:
+                    arr = live_stack.roi_view(arr)
+                    step = max(1, min(4, int(np.sqrt(arr.shape[0] * arr.shape[1]) // 128)))
+                return arr[::step, ::step]
+
             native_stats = None
             if stack_enabled and live_stack.stacked_raw16 is not None:
                 max_native = float((1 << live_stack.bits) - 1)
-                native_stats = np.clip(live_stack.stacked_raw16[::4, ::4], 0.0, max_native)
+                native_stats = np.clip(_stats_view(live_stack.stacked_raw16), 0.0, max_native)
 
             display_frame_ref[0] = save_frame  # クリックWB用に WB適用前を保持
+            display_size_ref[0] = (save_frame.shape[1], save_frame.shape[0])
 
             # --- WBウィンドウに現在値を表示（グレー領域を埋める）---
             wb_gains[0] = slider_to_gain(max(10, cv2.getTrackbarPos("B x100", WB_WINDOW_NAME)))
@@ -1743,6 +1848,8 @@ def run_raw_live_stack(args):
                 lines.append(
                     f"WB B:{wb_gains[0]:.2f} G:{wb_gains[1]:.2f} R:{wb_gains[2]:.2f} | Gamma:{gamma_value:.2f} | click:{'ON' if click_wb_mode else 'OFF'}"
                 )
+                if live_stack.roi is not None:
+                    lines.append(f"ROI: {live_stack.roi_text()}")
                 if live_stack.dark_frame is not None:
                     lines.append(f"Dark: {'ON' if live_stack.dark_enabled else 'OFF'} ({len(live_stack.dark_buffer) or '読込'}枚)  flip:{DARK_FLIP_LABELS[live_stack.dark_flip]}")
                 if last_view16 is not None:
@@ -1762,7 +1869,7 @@ def run_raw_live_stack(args):
                         )
                     elif last_view16 is not None:
                         current_ratio = compute_white_ratio_native(
-                            last_view16,
+                            _stats_view(last_view16),
                             live_stack.brightness_threshold,
                         )
                     else:
@@ -1807,7 +1914,7 @@ def run_raw_live_stack(args):
                 else:
                     # Stack OFF: 単フレームraw16で真の12bitヒストグラム＋stretchマーカー表示
                     # 1/4サブサンプリング（統計的な精度は十分）
-                    hist_native = last_view16[::4, ::4].astype(np.float32) if last_view16 is not None else None
+                    hist_native = _stats_view(last_view16).astype(np.float32) if last_view16 is not None else None
                     preview_frame = draw_ccdf_overlay(
                         preview_frame,
                         save_frame,
@@ -1824,6 +1931,7 @@ def run_raw_live_stack(args):
             if control_menu.menu_active:
                 preview_frame = control_menu.draw_menu(preview_frame, {
                     "rec": _ser_recording, "scr": screen_rec.active, "zoom": zoom_mode, "click_wb": click_wb_mode,
+                    "roi": live_stack.roi is not None or roi_ui["select"],
                 })
 
             # --- REC インジケータ ---
@@ -1902,6 +2010,38 @@ def run_raw_live_stack(args):
                 except Exception as _e:
                     print(f"[zoom error] {_e}")
                     traceback.print_exc()
+
+            # --- ROI 枠 ---
+            ROI_COLOR = (255, 0, 255)  # Zoom(黄)と区別する
+            ph_, pw_ = preview_frame.shape[:2]
+            dw_, dh_ = display_size_ref[0]
+            if roi_ui["dragging"] and roi_ui["start"] and roi_ui["current"]:
+                cv2.rectangle(preview_frame, roi_ui["start"], roi_ui["current"], ROI_COLOR, 1)
+            if live_stack.roi is not None:
+                rx0, ry0, rx1, ry1 = live_stack.roi
+                if flip_h:
+                    rx0, rx1 = dw_ - rx1, dw_ - rx0
+                if flip_v:
+                    ry0, ry1 = dh_ - ry1, dh_ - ry0
+                p0 = (round(rx0 * pw_ / dw_), round(ry0 * ph_ / dh_))
+                p1 = (round(rx1 * pw_ / dw_), round(ry1 * ph_ / dh_))
+                cv2.rectangle(preview_frame, p0, p1, ROI_COLOR, 1)
+                cv2.putText(preview_frame, "ROI", (p0[0] + 4, max(14, p0[1] - 6)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, ROI_COLOR, 1, cv2.LINE_AA)
+                if live_stack.align_enabled:
+                    # 位置合わせ窓（ROIより広い場合だけ薄く表示）
+                    aw = live_stack.align_window(dw_, dh_)
+                    if aw is not None and aw != live_stack.roi:
+                        ax0, ay0, ax1, ay1 = aw
+                        if flip_h:
+                            ax0, ax1 = dw_ - ax1, dw_ - ax0
+                        if flip_v:
+                            ay0, ay1 = dh_ - ay1, dh_ - ay0
+                        cv2.rectangle(preview_frame, (round(ax0 * pw_ / dw_), round(ay0 * ph_ / dh_)),
+                                      (round(ax1 * pw_ / dw_), round(ay1 * ph_ / dh_)), (140, 0, 140), 1)
+            if roi_ui["select"]:
+                cv2.putText(preview_frame, "ROI: drag to select  ([k] cancel)", (10, preview_frame.shape[0] - 40),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, ROI_COLOR, 1, cv2.LINE_AA)
 
             # --- 画面録画 ---
             screen_rec.write(preview_frame)
@@ -1996,6 +2136,15 @@ def run_raw_live_stack(args):
                     _zoom_drag["start"] = None
                     _zoom_drag["dragging"] = False
                 print(f"[zoom] {'ON' if zoom_mode else 'OFF'}")
+            elif key == ord("k"):
+                if roi_ui["select"]:
+                    roi_ui.update(select=False, dragging=False, start=None, current=None)
+                    print("[roi] 選択を取消")
+                elif live_stack.roi is not None:
+                    _apply_roi(None)
+                else:
+                    roi_ui["select"] = True
+                    print("[roi] プレビュー上でドラッグして範囲を指定してください（[k]で取消）")
             elif key == ord("w"):
                 click_wb_mode = not click_wb_mode
                 print(f"[wb] 白点クリックWB: {'ON' if click_wb_mode else 'OFF'}")
@@ -2276,6 +2425,7 @@ def run_raw_live_stack(args):
                 args.no_align = not live_stack.align_enabled
                 args.stack_method = live_stack.stack_method
                 args.no_dark_sub = not live_stack.dark_enabled
+                args.roi = None if live_stack.roi is None else [live_stack.roi[0], live_stack.roi[1], live_stack.roi[2] - live_stack.roi[0], live_stack.roi[3] - live_stack.roi[1]]
                 args.dark_flip = "auto" if _dark_flip_auto[0] else live_stack.dark_flip
                 args.wb_b = round(float(wb_gains[0]), 3)
                 args.wb_g = round(float(wb_gains[1]), 3)
@@ -2444,6 +2594,8 @@ def build_arg_parser():
     parser.add_argument("--clip-sigma", type=float, default=2.5, help="--stack-method sigma の棄却しきい値(標準偏差の倍数, デフォルト: 2.5)")
     parser.add_argument("--dark-flip", type=str, default="none", choices=list(DARK_FLIP_LABELS.keys()),
                         help="ダークを使うときの反転 (デフォルト: none)。反転して録画したSER(--ser-flip)など、ダークと映像の向きが違うときに h/v/hv を指定する。auto は最初のフレームでホットピクセルの一致から向きを判定する。メニューの Dark Flip でも切替可")
+    parser.add_argument("--roi", type=int, nargs=4, metavar=("X", "Y", "W", "H"), default=None,
+                        help="停止判定(Stop Threshold/Ratio)・ヒストグラム・位置合わせの対象領域 (raw px。偶数に丸められる)。未指定=全体判定・中央窓で位置合わせ。位置合わせ窓はROIの中心で256pxまで広げる。[k]キーでもドラッグ指定でき、[C]でJSONに保存される")
     parser.add_argument("--no-align", action="store_true", help="位置合わせを無効化して単純加算 ([A]キー/メニューで切替可)")
     parser.add_argument("--no-dark-sub", action="store_true", help="ダーク減算とホットピクセル補間を無効化 ([E]キー/メニューで切替可)")
     parser.add_argument("--wb-b", type=float, default=None, help="初期WBゲイン B (デフォルト: 1.0)")

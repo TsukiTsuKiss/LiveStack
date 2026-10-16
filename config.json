@@ -32,6 +32,7 @@
   "stop_threshold": 2048,
   "stop_ratio": 10.0,
   "align_size": 50,
+  "roi": null,
   "stack_method": "sum",
   "clip_sigma": 2.5,
   "no_align": false,

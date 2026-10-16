@@ -26,6 +26,7 @@
   "flip_h": true,
   "flip_v": false,
   "dark_file": "dark.fits",
+  "roi": null,
   "stop_threshold": 3095,
   "stop_ratio": 50.0,
   "wb_b": 2.6,
