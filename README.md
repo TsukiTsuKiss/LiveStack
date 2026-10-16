@@ -479,6 +479,9 @@ pip install -r requirements.txt
 
 ## 変更履歴
 
+#### 2026/10/16 raw_live_stack.py: 起動時のウィンドウ位置を修正
+- 既定ではウィンドウの左上が画面中央に来て全体が見えなかったため、プレビューは画面の水平中央（上端から40px）、WB/ガンマウィンドウは左下に配置するようにした（画面サイズが取得できたときのみ。Wayland のネイティブ表示では無視される場合がある）。
+
 #### 2026/10/16 raw_live_stack.py: `[x]` 録画を「RAW SER＋スタックSER＋日時フォルダ」に変更
 - 静止画（PNG/JPEG/FITS/NPY）も `--rec-dir` 直下に日時名で保存（1ファイルなので日時フォルダは作らない）。
 - 録画1回ごとに、録画用フォルダ（`--rec-dir`、既定 `recordings/`。`.gitignore` に登録済み）の下に日時フォルダ（`yyyymmdd_HHMMSS/`）を作り、`yyyymmdd_HHMMSS_raw.ser`（カメラRAW・無反転。後処理用）と `yyyymmdd_HHMMSS_stack.ser`（スタック済みフレーム。すぐ公開する用。スタックON中のみ）の2本を保存。使ったダーク（`dark.fits`）と設定JSON（`--config`/`--meta` のファイル。未指定なら実効設定を `config.json` として保存）も同じフォルダに入れる。

@@ -1367,6 +1367,9 @@ def run_raw_live_stack(args):
 
         cv2.namedWindow(PREVIEW_WINDOW_NAME, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
         cv2.resizeWindow(PREVIEW_WINDOW_NAME, disp_w, disp_h)
+        # 既定の配置はウィンドウの左上が画面中央になり全体が見えないので、画面内に収まる位置へ移動する
+        if screen_size is not None:
+            cv2.moveWindow(PREVIEW_WINDOW_NAME, max(0, (screen_size[0] - disp_w) // 2), 40)
 
         # --- WB / ガンマ 初期化 ---
         wb_gains = [1.0, 1.0, 1.0]
@@ -1397,6 +1400,8 @@ def run_raw_live_stack(args):
         cv2.createTrackbar("R x100", WB_WINDOW_NAME, 100, 400, lambda _v: None)
         cv2.createTrackbar("Gamma x100", WB_WINDOW_NAME, 80, 400, lambda _v: None)
         cv2.resizeWindow(WB_WINDOW_NAME, 420, 120)
+        if screen_size is not None:
+            cv2.moveWindow(WB_WINDOW_NAME, 0, max(0, screen_size[1] - 160))
         if args.wb_b is not None:
             cv2.setTrackbarPos("B x100", WB_WINDOW_NAME, gain_to_slider(args.wb_b))
         if args.wb_g is not None:
