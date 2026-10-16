@@ -24,3 +24,6 @@ __pycache__/
 
 # VS Code ワークスペース設定
 .vscode/
+
+# ドキュメント用の写真（ハードウェア構成）はリポジトリに含める
+!docs/images/*.jpg
