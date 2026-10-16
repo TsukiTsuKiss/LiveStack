@@ -538,6 +538,12 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+## ライセンス
+
+- ソフトウェア（Pythonコードなど）: [MIT License](LICENSE)
+- 3Dデータ（[cad/](cad/)）: [CC BY 4.0](cad/LICENSE.md)（作者名「TsukiTsuKiss」の表示が条件）
+- 写真（[docs/images/](docs/images/)）: [CC BY 4.0](docs/images/LICENSE.md)（作者名「TsukiTsuKiss」の表示が条件）
+
 ## 変更履歴
 
 #### 2026/10/16 ハードウェア構成の追記
