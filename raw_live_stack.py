@@ -1575,7 +1575,7 @@ def run_raw_live_stack(args):
 
         # --- SERトグル録画状態 ---
         # 画面録画（info/ヒストグラム/メニュー等のオーバーレイ込みのプレビューをAVIに保存）
-        screen_rec = ScreenRecorder(args.screen_fps)
+        screen_rec = ScreenRecorder(args.screen_fps, args.rec_dir or ".")
         _ser_recording = False
         _ser_raw = None        # カメラRAWのSER（後処理用。反転しない）
         _ser_stack = None      # スタック済みフレームのSER（公開用。スタックON中のみ書く）
@@ -2017,7 +2017,7 @@ def run_raw_live_stack(args):
             dw_, dh_ = display_size_ref[0]
             if roi_ui["dragging"] and roi_ui["start"] and roi_ui["current"]:
                 cv2.rectangle(preview_frame, roi_ui["start"], roi_ui["current"], ROI_COLOR, 1)
-            if live_stack.roi is not None:
+            if live_stack.roi is not None and (info_display or roi_ui["select"]):
                 rx0, ry0, rx1, ry1 = live_stack.roi
                 if flip_h:
                     rx0, rx1 = dw_ - rx1, dw_ - rx0

@@ -320,7 +320,7 @@ def main():
         try:
             subprocess.run([sys.executable, os.path.abspath(__file__), "--ser", ser_path, "--wb", args.wb] + (["--dark", dark_path] if dark_path else []) + ["--child", key],
                            cwd=work, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            avis = sorted(glob.glob(os.path.join(work, "*_screen.avi")))
+            avis = sorted(glob.glob(os.path.join(work, "**", "*_screen.avi"), recursive=True))
             if not avis:
                 print("  録画ファイルが作られませんでした")
                 continue

@@ -244,7 +244,7 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - `D`: ダークフレームクリア（終了時に保存されなくなる）
 - `C`: 設定をJSONに保存（`--config` 指定時はそのパス、未指定時は `config.json`）
 - `c`: 操作メニュー開閉（上下キーで選択、Enterで実行、ESC/`c`で閉じる。左右キーは使わない）。画像保存（PNG/JPEG/FITS/NPY）、SER録画、画面録画、Zoom、白点クリックWB、WB/ガンマ/スタックのリセット、ダーク取得/クリア、JSON保存をメニューから実行できる（左右/上下反転は設定メニューの `Flip H`/`Flip V`）（Linuxで使えない大文字キーの代替）
-- `y`: 画面録画AVI開始/停止（info・ヒストグラム・各メニュー・ズームPiP等の表示込みでプレビューを `yyyymmdd_HHMMSS_screen.avi` に保存。MJPG、`--screen-fps` で指定、デフォルト15fps。録画中は左上に `SCR` 表示（録画映像には写らない）。SNS投稿用は `ffmpeg -i in.avi -c:v libx264 -pix_fmt yuv420p out.mp4` で変換）
+- `y`: 画面録画AVI開始/停止（info・ヒストグラム・各メニュー・ズームPiP等の表示込みでプレビューを `--rec-dir`（デフォルト `recordings`）の `yyyymmdd_HHMMSS_screen.avi` に保存。MJPG、`--screen-fps` で指定、デフォルト15fps。録画中は左上に `SCR` 表示（録画映像には写らない）。SNS投稿用は `ffmpeg -i in.avi -c:v libx264 -pix_fmt yuv420p out.mp4` で変換）
 - `S` / `x`: SER録画開始/停止トグル。`recordings/` 下の日時フォルダに `*_raw.ser`（カメラRAW）と `*_stack.ser`（スタック済み。スタックON中のみ）、使ったダーク・設定JSONを保存（`--no-rec-raw` / `--no-rec-stack` / `--no-rec-folder` で無効化可）
 - Linux の Qt 版 OpenCV では Shift が反映されないため、大文字キー（`S`/`W` 等）は使えない。`S` は `x`、`W` は `u` で代用する。`A`/`E`/`H` は設定メニューの `Align`/`Dark Sub`/`Histogram` から切替できる。他の大文字キー機能も `c` の操作メニューから実行できる
 - `z`: フォーカスアシストズーム ON/OFF（ON中にクリック/ドラッグで拡大エリアを選択）
@@ -691,7 +691,7 @@ pip install -r requirements.txt
 - **安全なカメラ切り替え**: 切り替え失敗時の自動復帰機能
 - **ファイル名にカメラ番号付与**: 保存ファイル名にカメラ番号を自動追加
 - **メニュー表示の最適化**: カメラ表示の冗長性を解消（Camera: 0）
-- **情報表示切り替え機能**: `[i]`キーで画面上のテキスト表示をON/OFF可能
+- **情報表示切り替え機能**: `[i]`キーで画面上のテキスト表示とROI枠をON/OFF可能
 - **設定メニューに情報表示項目追加**: 設定メニューから情報表示のON/OFFを設定可能
 - **FITS保存の改善**: オーバーレイテキストを除外し、元のフレームデータのみを保存するよう修正
 - **双方向同期**: キー操作と設定メニューの設定値が相互に同期される仕組みを実装

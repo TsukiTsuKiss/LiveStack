@@ -6,6 +6,7 @@ live_stack.py / raw_live_stack.py で共通利用する設定メニュー・操�
 """
 
 import datetime
+import os
 import time
 
 import cv2
@@ -477,7 +478,8 @@ def toggle_settings_menu(settings_menu, control_menu):
 class ScreenRecorder:
     """画面録画。info/ヒストグラム/メニュー等を合成した最終プレビューフレームをAVI(MJPG)に保存する。"""
 
-    def __init__(self, fps=15.0):
+    def __init__(self, fps=15.0, out_dir=None):
+        self.out_dir = out_dir  # None=カレント
         self.fps = max(float(fps), 1.0)
         self._interval = 1.0 / self.fps
         self._writer = None
@@ -499,7 +501,11 @@ class ScreenRecorder:
 
     def _start(self, frame):
         self._size = (frame.shape[1], frame.shape[0])
-        self.filename = f"{datetime.datetime.now():%Y%m%d_%H%M%S}_screen.avi"
+        name = f"{datetime.datetime.now():%Y%m%d_%H%M%S}_screen.avi"
+        if self.out_dir:
+            os.makedirs(self.out_dir, exist_ok=True)
+            name = os.path.join(self.out_dir, name)
+        self.filename = name
         writer = cv2.VideoWriter(self.filename, cv2.VideoWriter_fourcc(*"MJPG"), self.fps, self._size)
         if not writer.isOpened():
             print("[SCR] 画面録画を開始できません (VideoWriter open失敗)")
