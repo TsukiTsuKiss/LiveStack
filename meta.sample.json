@@ -1,9 +1,0 @@
-{
-  "_comment": "観測機材・メタ情報のサンプル。meta.json にコピーして書き換える（meta.json は .gitignore 対象）。config の \"meta\": \"meta.json\" または --meta で指定すると、SER録画フォルダにコピーされる",
-  "telescope": "Telescope name",
-  "filter": "Filter name",
-  "mount": "Mount name",
-  "object": "M42",
-  "observer": "Your name",
-  "instrument": "Camera / sensor name"
-}

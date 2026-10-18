@@ -13,9 +13,6 @@
 # 録画用フォルダ（[x]録画の出力先: SER・ダーク・設定JSONのコピー）
 recordings/
 
-# 観測メタ情報（機材名・観測者名など。サンプルは meta.sample.json）
-meta.json
-
 # キャッシュファイル
 __pycache__/
 *.pyc
