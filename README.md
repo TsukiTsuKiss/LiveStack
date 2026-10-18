@@ -228,7 +228,7 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - `R`: LiveStackリセット
 - `s`: PNG保存（WB/ガンマ適用後、フルサイズ、tEXtメタデータ付き）
 - `j`: JPEG保存（WB/ガンマ適用後、フルサイズ、EXIF付き）
-- `f`: FITS保存（uint16、スタック平均値）
+- `f`: FITS保存（uint16、スタック平均値）。スタックON時は、後処理用にクリップ・丸めのない float32 の Bayer 単面 `<日時>_bayer_f32.fits` も保存する（無反転。`BAYER` / `NFRAMES` / `METHOD` / `FLIP_H` / `FLIP_V` / `EFFBITS` / `DARKSUB`（ダーク差し引き済みか）をヘッダに記録。Sum の 65535 超も保持）
 - `r`: NPY保存（16bit RAW）
 
 保存ファイル名は `yyyymmdd_HHMMSS.拡張子`（ローカル時刻。SERは録画開始時刻）。`raw_live_stack.py` では静止画・録画とも `--rec-dir`（既定 `recordings/`）以下に保存する。UTCはファイル内に記録される（FITS: `DATE-OBS`、PNG: `DateTimeUTC`、JPEG: EXIF UserComment、SER: ヘッダー`DateTimeUTC`とトレーラー）。NPYには日時情報なし。- `h`: 左右反転 ON/OFF

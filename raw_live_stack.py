@@ -1082,6 +1082,21 @@ def save_fits(image, filename, metadata):
     print(f"FITSファイル保存: {filename}")
 
 
+def save_fits_bayer_f32(image, filename, metadata):
+    """スタック結果をfloat32のBayer単面（クリップ・丸めなし、無反転）でFITS保存する。後処理(HDR合成・ストレッチ)用。"""
+    try:
+        from astropy.io import fits
+    except Exception as e:
+        print(f"FITS保存に失敗: astropy が利用できません ({e})")
+        return
+    hdu = fits.PrimaryHDU(np.asarray(image, dtype=np.float32))
+    for key, value in metadata.items():
+        if key != "BITPIX":  # BITPIXはFITSの予約キーのため使わない
+            hdu.header[key] = value
+    hdu.writeto(filename, overwrite=True)
+    print(f"FITSファイル保存(float32 Bayer): {filename}")
+
+
 def _save_dark_fits(path, dark_frame, bayer_name, dark_count):
     """ダークフレームをFITS(float32 Bayer単面)で保存する。"""
     try:
@@ -2354,6 +2369,12 @@ def run_raw_live_stack(args):
                         bgr16 = cv2.flip(bgr16, 0)
                     save_fits(bgr16, fname, metadata)
                     print(f"[save] FITS (uint16 BGR stacked {live_stack.stack_method}, {live_stack.stack_count}frm): {fname}")
+                    # クリップ・丸めのない線形データ（Sumの65535超も保持）。反転は掛けず、向きはFLIP_H/FLIP_Vに記録
+                    f32_meta = dict(metadata, NFRAMES=live_stack.stack_count, METHOD=live_stack.stack_method,
+                                    EFFBITS=effective_bits, BAYER=bayer_keys[bayer_idx],
+                                    DARKSUB=bool(live_stack.dark_enabled and live_stack.dark_eff is not None))
+                    f32_meta.pop("MODE", None)
+                    save_fits_bayer_f32(live_stack.stacked_raw16, f"{os.path.splitext(fname)[0]}_bayer_f32.fits", f32_meta)
                 else:
                     save_fits(save_frame, fname, metadata)
             elif key == ord("a"):
