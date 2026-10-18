@@ -123,6 +123,7 @@ camera-live/
 python demo/make_demo.py --ser 20261013_225204.ser                 # 全シーン
 python demo/make_demo.py --ser xxx.ser --scenes live,menu           # シーンを指定
 python demo/make_demo.py --ser xxx.ser --mp4                        # ffmpegでmp4(H.264, crf18)も作る
+python demo/make_demo.py --ser xxx.ser --mp4 --concat               # 作ったシーンをSCENESの順に結合した demo_all.avi / .mp4 も作る
 python demo/make_demo.py --ser xxx.ser --wb 1.6,1.0,1.4             # ホワイトバランス B,G,R（デフォルトは1.0,1.0,1.0=なし）
 ```
 
@@ -133,6 +134,7 @@ python demo/make_demo.py --ser xxx.ser --wb 1.6,1.0,1.4             # ホワイ�
 | `stack` | スタック: Sum の飽和停止と、比較明・比較暗・中央値・シグマクリップ・シグマクリップ加算の比較 |
 | `control` | 操作メニュー: 保存、SER録画、リセット、JSON保存 |
 | `player` | SERプレーヤー: 一時停止・コマ送り・ジャンプ・ループモード |
+| `roi` | ROI: `--roi` で指定した領域で判定、`[i]` で枠のON/OFF、`[k]` でクリア |
 
 - 出力は `demo/out/<シーン名>.avi`（`.gitignore` の `*.avi` / `*.mp4` で除外済み）。保存系の操作で作られる画像・SER・設定JSONは一時ディレクトリに出して、終了時に削除します。
 - 実行中はアプリのウィンドウが開きます（表示環境が必要）。シーンの長さは30〜80秒程度で、実時間で録画するため全シーンの生成に5分ほどかかります。

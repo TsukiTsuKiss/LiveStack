@@ -65,11 +65,11 @@ class Timeline:
 
 
 # 設定メニュー(m)の項目（ストリーム受信/SER再生時）
-S_THRESH, S_RATIO, S_MAXF, S_INFO, S_HIST, S_FLIPH, S_FLIPV, S_SERFLIP, S_ALIGNSZ, S_ALIGN, S_DARK, S_DARKFLIP, S_METHOD, S_STACK = range(14)
-S_N = 14
+S_THRESH, S_RATIO, S_MAXF, S_INFO, S_HIST, S_FLIPH, S_FLIPV, S_SERFLIP, S_RECRAW, S_RECSTACK, S_RECFOLDER, S_ALIGNSZ, S_ALIGN, S_DARK, S_DARKFLIP, S_METHOD, S_STACK = range(17)
+S_N = 17
 # 操作メニュー(c)の項目
-C_PNG, C_JPEG, C_FITS, C_NPY, C_SER, C_SCR, C_ZOOM, C_CLICKWB, C_WBRESET, C_GAMMA, C_STACKRESET, C_DARKCAP, C_DARKCLR, C_JSON = range(14)
-C_N = 14
+C_PNG, C_JPEG, C_FITS, C_NPY, C_SER, C_SCR, C_ZOOM, C_ROI, C_CLICKWB, C_WBRESET, C_GAMMA, C_STACKRESET, C_DARKCAP, C_DARKCLR, C_JSON = range(15)
+C_N = 15
 
 
 def scene_live(tl):
@@ -80,8 +80,8 @@ def scene_live(tl):
     tl.press("H", "[H] Histogram / CCDF ON", 2.0)
     tl.press("a", "[a] Auto stretch OFF (raw 12bit -> 8bit)", 2.5)
     tl.press("a", "[a] Auto stretch ON", 2.0)
-    tl.press("h", "[h] Flip horizontal", 2.0)
-    tl.press("h", "[h] Flip horizontal OFF", 1.5)
+    tl.press("h", "[h] Flip horizontal OFF (mirrored, as captured)", 2.0)
+    tl.press("h", "[h] Flip horizontal ON (corrected image)", 1.5)
     tl.press("v", "[v] Flip vertical", 2.0)
     tl.press("v", "[v] Flip vertical OFF", 1.5)
     tl.press("b", "[b] Bayer pattern cycle (colors change)", 1.5)
@@ -107,10 +107,10 @@ def scene_menu(tl):
     tl.press("RIGHT", "Histogram OFF", 1.8)
     tl.press("RIGHT", "Histogram ON", 1.5)
     cur = tl.goto(cur, S_FLIPH, S_N)
-    tl.press("RIGHT", "Flip H ON", 2.0)
-    tl.press("RIGHT", "Flip H OFF", 1.2)
+    tl.press("RIGHT", "Flip H OFF (mirrored, as captured)", 2.0)
+    tl.press("RIGHT", "Flip H ON (corrected image)", 1.2)
     cur = tl.goto(cur, S_SERFLIP, S_N, "SER Flip: apply flip to SER recording (needs Flip H/V)")
-    tl.press("RIGHT", "SER Flip ON  (inactive while Flip H/V are OFF)", 3.0)
+    tl.press("RIGHT", "SER Flip ON  (Flip H is applied to the SER)", 3.0)
     tl.press("RIGHT", "SER Flip OFF", 1.2)
     cur = tl.goto(cur, S_DARKFLIP, S_N, "Dark Flip: match the dark to a flipped SER (Auto detects it)")
     tl.cap("Dark Flip: auto-detected from the hot pixels shared by the dark and the frames", 3.0)
@@ -190,13 +190,32 @@ def scene_player(tl):
     tl.press("l", "[l] Loop: reset (default)", 5.0)
 
 
+def scene_roi(tl):
+    tl.cap("ROI (--roi X Y W H): stop judgment / CCDF / alignment use this region", 3.5)
+    tl.press("t", "[t] Stack ON  -  judged inside the magenta ROI only", 8.0)
+    tl.press("i", "[i] Info OFF: ROI frame hides too (ROI still applies)", 3.0)
+    tl.press("i", "[i] Info ON: ROI frame is back", 3.0)
+    tl.press("k", "[k] Clear ROI  -  whole frame is judged", 4.0)
+    tl.press("t", "[t] Stack OFF", 2.0)
+
+
 SCENES = {
     "live": ("01_live_view", scene_live, []),
     "menu": ("02_settings_menu", scene_menu, []),
     "stack": ("03_stack_methods", scene_stack, ["--max-frames", "20", "--ser-loop-mode", "continuous"]),
     "control": ("04_control_menu", scene_control, []),
     "player": ("05_ser_player", scene_player, ["--max-frames", "30"]),
+    "roi": ("06_roi", scene_roi, ["--max-frames", "20", "--ser-loop-mode", "continuous"]),
 }
+
+
+def ser_roi_arg(ser_path):
+    """SERのフレームサイズから、M42（画面中央やや右下）を囲む領域をROI(X Y W H)として返す（偶数座標）。"""
+    import struct
+
+    with open(ser_path, "rb") as f:
+        _cid, _le, w, h, _depth, _n = struct.unpack_from("<6I", f.read(178), 18)
+    return [str(int(v) // 2 * 2) for v in (w * 0.38, h * 0.40, w * 0.32, h * 0.36)]
 
 
 def write_pedestal_dark(ser_path, path):
@@ -284,9 +303,33 @@ def run_child(scene_key, ser_path, wb, dark_path):
     shown = os.path.basename(ser_path)
     os.symlink(ser_path, shown)
     sys.argv = ["raw_live_stack.py", "--source", shown, "--ser-fps", "8", "--stop-threshold", "2048",
-                "--dark-file", "demo_dark.fits",
+                "--dark-file", "demo_dark.fits", "--flip-h",  # 撮影は裏像のため全シーン左右反転で見せる
                 "--wb-b", wb[0], "--wb-g", wb[1], "--wb-r", wb[2]] + dark_args + extra
+    if scene_key == "roi":
+        sys.argv += ["--roi"] + ser_roi_arg(ser_path)
     runpy.run_path(os.path.join(ROOT, "raw_live_stack.py"), run_name="__main__")
+
+
+def concat_scenes(keys, mp4):
+    """作成済みのシーンAVIをSCENESの順に結合する（再エンコードなし。mp4指定時はH.264も作る）。"""
+    if not keys:
+        print("結合するシーンがありません")
+        return
+    list_path = os.path.join(OUT_DIR, "_concat.txt")
+    with open(list_path, "w", encoding="utf-8") as f:
+        for k in keys:
+            f.write(f"file '{os.path.join(OUT_DIR, SCENES[k][0] + '.avi')}'\n")
+    try:
+        out = os.path.join(OUT_DIR, "demo_all.avi")
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", out], check=True)
+        print(f"=== 結合: {', '.join(SCENES[k][0] for k in keys)} ===\n  -> {out}", flush=True)
+        if mp4:
+            out_mp4 = os.path.join(OUT_DIR, "demo_all.mp4")
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", out, "-c:v", "libx264", "-crf", "18",
+                            "-pix_fmt", "yuv420p", "-movflags", "+faststart", out_mp4], check=True)
+            print(f"  -> {out_mp4}", flush=True)
+    finally:
+        os.remove(list_path)
 
 
 def main():
@@ -296,6 +339,7 @@ def main():
     parser.add_argument("--mp4", action="store_true", help="ffmpegでmp4(H.264)も作る")
     parser.add_argument("--dark", help="実ダークのFITS (例: dark.fits)。向きは --dark-flip auto で自動判定する。省略時は黒レベルだけの擬似ダーク")
     parser.add_argument("--wb", default="1.0,1.0,1.0", help="ホワイトバランスのゲイン B,G,R (デフォルト: 1.0,1.0,1.0=なし)")
+    parser.add_argument("--concat", action="store_true", help="指定シーンをSCENESの順に結合して demo_all.avi を作る（--mp4 併用で demo_all.mp4 も）")
     parser.add_argument("--child", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
@@ -311,9 +355,12 @@ def main():
         return
 
     os.makedirs(OUT_DIR, exist_ok=True)
-    for key in [s.strip() for s in args.scenes.split(",") if s.strip()]:
+    keys = [s.strip() for s in args.scenes.split(",") if s.strip()]
+    for key in keys:
         if key not in SCENES:
             parser.error(f"不明なシーン: {key}")
+    made = []
+    for key in keys:
         name = SCENES[key][0]
         print(f"=== {name} ===", flush=True)
         work = tempfile.mkdtemp(prefix="livestack_demo_")
@@ -327,6 +374,7 @@ def main():
             dst = os.path.join(OUT_DIR, f"{name}.avi")
             shutil.move(avis[-1], dst)
             print(f"  -> {dst}", flush=True)
+            made.append(key)
             if args.mp4:
                 mp4 = os.path.join(OUT_DIR, f"{name}.mp4")
                 subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", dst, "-c:v", "libx264", "-crf", "18",
@@ -334,6 +382,9 @@ def main():
                 print(f"  -> {mp4}", flush=True)
         finally:
             shutil.rmtree(work, ignore_errors=True)
+
+    if args.concat:
+        concat_scenes([k for k in SCENES if k in made], args.mp4)
 
 
 if __name__ == "__main__":

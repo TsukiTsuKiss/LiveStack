@@ -1618,13 +1618,25 @@ def run_raw_live_stack(args):
                     _save_dark_fits(dst, live_stack.dark_frame, bayer_keys[bayer_idx], len(live_stack.dark_buffer))
             used = [p for p in (args.config, getattr(args, "meta", None)) if p]
             cfg_dir = os.path.dirname(os.path.abspath(args.config)) if args.config else ""
+            meta_copied = False
             for p in used:
                 src = p if os.path.isfile(p) else os.path.join(cfg_dir, p)
                 if os.path.isfile(src):
                     shutil.copy2(src, os.path.join(folder, os.path.basename(src)))
                     print(f"[rec] 設定をコピー: {os.path.join(folder, os.path.basename(src))}")
+                    meta_copied = meta_copied or p == getattr(args, "meta", None)
+                elif p == getattr(args, "meta", None):
+                    print(f"[rec] metaファイルが見つかりません: {p}")
             if not args.config:
                 _save_config(os.path.join(folder, "config.json"), args)
+            if not meta_copied:
+                # metaファイルが無い/コピーできない場合でも、読み込み済みの観測情報を残す
+                meta_vals = {k: getattr(args, k) for k in _OBS_META_KEYS if getattr(args, k, None)}
+                if meta_vals:
+                    meta_name = os.path.basename(getattr(args, "meta", None) or "meta.json")
+                    with open(os.path.join(folder, meta_name), "w", encoding="utf-8") as f:
+                        json.dump(meta_vals, f, ensure_ascii=False, indent=2)
+                    print(f"[rec] 観測メタ情報を保存: {os.path.join(folder, meta_name)}")
 
         def _close_ser_files(reason):
             nonlocal _ser_raw, _ser_stack
@@ -2621,6 +2633,9 @@ def build_arg_parser():
     return parser
 
 
+_OBS_META_KEYS = ("telescope", "filter", "mount", "object", "observer", "instrument")
+
+
 def _load_config(path):
     """設定JSONを読み込んでdictを返す。metaキーがあれば別ファイルをマージする。"""
     try:
@@ -2645,8 +2660,7 @@ def _load_config(path):
 
 def _save_config(path, args):
     """実効引数をJSON設定ファイルに保存する。"""
-    _META_KEYS = {"meta", "telescope", "filter", "mount", "object", "observer", "instrument", "_comment"}
-    exclude = {"config", "save_config"} | _META_KEYS
+    exclude = {"config", "save_config", "_comment"} | set(_OBS_META_KEYS)
     d = {k: v for k, v in vars(args).items() if k not in exclude}
     with open(path, "w", encoding="utf-8") as f:
         json.dump(d, f, ensure_ascii=False, indent=2)
