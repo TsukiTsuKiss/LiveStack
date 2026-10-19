@@ -1,12 +1,12 @@
 {
-  "_comment": "センサー依存設定 (Pi 3 + IMX708)。動作実績の2304x1296 10P(stride 2880)を元にした値。WBは未調整",
-  "width": 2304,
-  "height": 1296,
-  "raw_width": 2304,
-  "raw_height": 1296,
+  "_comment": "センサー依存設定 (Pi 3 + IMX708)。動作実績の4068x2592要求 10P (実RAW 4608x2592, stride 5760) の値。WBは未調整",
+  "width": 4608,
+  "height": 2592,
+  "raw_width": 4608,
+  "raw_height": 2592,
   "crop_x": 0,
   "crop_y": 0,
-  "stride": 2880,
+  "stride": 5760,
   "wire_format": null,
   "u12_shift": "auto",
   "u10_shift": "auto",
@@ -34,6 +34,6 @@
   "zoom_pip_size": 640,
   "zoom_click_size": 128,
   "zoom_corner": "br",
-  "rpicam_cmd": "rpicam-raw --width 2304 --height 1296 --framerate 0.3 --shutter 600000 --gain 2 --vflip --hflip -t 0 --listen -o tcp://0.0.0.0:8888",
+  "rpicam_cmd": "rpicam-raw --width 4068 --height 2592 --framerate 0.3 -t 0 --listen -o tcp://0.0.0.0:8888 --shutter 600000 --gain 2 --vflip --hflip",
   "no_ssh": false
 }
