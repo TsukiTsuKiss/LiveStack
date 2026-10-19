@@ -1,0 +1,11 @@
+{
+  "_comment": "観測プラン: 惑星観測 (同一host/sensorを流用し画角のみ縮小上書き) -> host=host_raspi_3.json, sensor=sensor_imx219.json, meta=meta_imx219.json",
+  "host": "host_raspi_3.json",
+  "sensor": "sensor_imx219.json",
+  "meta": "meta_imx219.json",
+  "width": 640,
+  "height": 480,
+  "raw_width": 640,
+  "raw_height": 480,
+  "rpicam_cmd": "rpicam-raw --width 640 --height 480 --framerate 10 --shutter 10000 --gain 10 -t 0 --listen -o tcp://0.0.0.0:8888"
+}

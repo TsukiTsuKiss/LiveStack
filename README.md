@@ -182,13 +182,13 @@ python raw_live_stack.py --source tcp://192.168.1.17:8888 \
 python raw_live_stack.py --config imx678.json
 ```
 
-**起動例（SSH連携 ワンコマンド起動。imx585.json に ssh_host/rpicam_cmd を記載済みの場合）:**
+**起動例（SSH連携 ワンコマンド起動。観測プランJSON(host/sensor/meta参照)に ssh_host/rpicam_cmd を記載済みの場合）:**
 ```bash
 # PC側だけで起動（rpicam-rawのSSH起動・終了も自動）
-python raw_live_stack.py --config imx585.json
+python raw_live_stack.py --config config/nebula_imx585.json
 
 # Pi側で既にrpicam-rawを手動起動済みのとき（SSH自動起動をスキップ）
-python raw_live_stack.py --config imx585.json --no-ssh
+python raw_live_stack.py --config config/nebula_imx585.json --no-ssh
 ```
 
 **起動例（12U運用。IMX708 など）:**
@@ -435,10 +435,10 @@ cd /home/tsuki/MyApps/camera-live
 source ../preview/.venv/bin/activate
 
 # RAW TCPストリーム受信 + LiveStack
-python raw_live_stack.py --config imx585.json
+python raw_live_stack.py --config config/nebula_imx585.json
 
 # SSH自動起動を使わず手動起動モードで接続
-python raw_live_stack.py --config imx585.json --no-ssh
+python raw_live_stack.py --config config/nebula_imx585.json --no-ssh
 
 # LiveStack機能付きプレビュー（ローカルカメラ）
 python3 live_stack.py
@@ -469,6 +469,24 @@ python3 live_stack.py --source tcp://192.168.1.17:8888
 # RAW TCPストリーム (rpicam-raw) + LiveStack
 python raw_live_stack.py --source tcp://192.168.1.17:8888 --bits 12 --bayer BGGR --raw-width 3856 --raw-height 2180 --stride 5792
 ```
+
+### `--config` によるホスト設定の共用・SSH自動起動（ピント合わせ用）
+
+`live_stack.py` も `raw_live_stack.py` と同じ `config/host_*.json`（`sensor`/`meta`参照込みの観測プランJSONも可）を `--config` で読み込め、`source`/`ssh_host`/`ssh_user`/`ssh_key`/`rpicam_vid_cmd` を引き継げます。host JSONに `rpicam_vid_cmd` を記載しておけば、SSH経由でPi側の `rpicam-vid` をワンコマンドで自動起動・終了できます（`raw_live_stack.py` の `rpicam-raw` 用ポートとは別ポートを使う想定。既定サンプルはポート8889）。
+
+```bash
+# 観測プランJSON(host/sensor/meta継承)でそのままピント合わせプレビューを起動
+python live_stack.py --config config/nebula_imx678.json
+
+# SSH自動起動を使わず、Pi側で既にrpicam-vidを手動起動済みのとき
+python live_stack.py --config config/nebula_imx678.json --no-ssh
+
+# --configを使わず個別指定する場合
+python live_stack.py --ssh-host 192.168.1.17 --ssh-user tsuki --ssh-key ~/.ssh/id_rsa \
+    --rpicam-vid-cmd "rpicam-vid -t 0 -n --width 1280 --height 720 --framerate 15 --codec h264 --listen -o tcp://0.0.0.0:8889 --bitrate 5000000"
+```
+
+補足: SSH自動起動時は `rpicam_vid_cmd` の `-o tcp://.../PORT` からポートを読み取り、`--source` のポートを自動的にそのポートへ上書きします（host JSONの `source` はraw_live_stack.py用の8888のままでも問題ありません）。
 
 ### 送信側（Raspberry Pi: rpicam-vid の例）
 
@@ -559,7 +577,7 @@ pip install -r requirements.txt
 
 #### 2026/10/16 raw_live_stack.py: `[x]` 録画を「RAW SER＋スタックSER＋日時フォルダ」に変更
 - 静止画（PNG/JPEG/FITS/NPY）も `--rec-dir` 直下に日時名で保存（1ファイルなので日時フォルダは作らない）。
-- 録画1回ごとに、録画用フォルダ（`--rec-dir`、既定 `recordings/`。`.gitignore` に登録済み）の下に日時フォルダ（`yyyymmdd_HHMMSS/`）を作り、`yyyymmdd_HHMMSS_raw.ser`（カメラRAW・無反転。後処理用）と `yyyymmdd_HHMMSS_stack.ser`（スタック済みフレーム。すぐ公開する用。スタックON中のみ）の2本を保存。使ったダーク（`dark.fits`）と設定JSON（`--config`/`--meta` のファイル。未指定なら実効設定を `config.json` として保存）も同じフォルダに入れる。観測メタ情報（機材・対象など）は `meta.json` を自分の機材に書き換え、`config.json` の `"meta": "meta.json"` か `--meta meta.json` で指定する。
+- 録画1回ごとに、録画用フォルダ（`--rec-dir`、既定 `recordings/`。`.gitignore` に登録済み）の下に日時フォルダ（`yyyymmdd_HHMMSS/`）を作り、`yyyymmdd_HHMMSS_raw.ser`（カメラRAW・無反転。後処理用）と `yyyymmdd_HHMMSS_stack.ser`（スタック済みフレーム。すぐ公開する用。スタックON中のみ）の2本を保存。使ったダーク（`dark.fits`）と設定JSON（`--config`/`--meta` のファイル。未指定なら実効設定を `config.json` として保存）も同じフォルダに入れる。観測メタ情報（機材・対象など）は `meta_<センサー名>.json` を自分の機材に書き換え、観測プランJSONの `"meta": "meta_imx585.json"` のように指定するか `--meta` で直接指定する。
 - `--no-rec-raw` / `--no-rec-stack` / `--no-rec-folder`（設定メニュー `Rec Raw` / `Rec Stack` / `Rec Folder`、config は `no_rec_raw` 等）で個別に無効化。`--no-rec-folder` では `--rec-dir` 直下に `*_raw.ser` / `*_stack.ser` だけを保存（ダーク・JSONはコピーしない）。
 - `--ser-flip` はスタックSERにのみ効く（RAW SERは常に無反転）ため、RAW SER＋ダークの組み合わせでは `Dark Flip` は不要。
 
@@ -630,7 +648,7 @@ pip install -r requirements.txt
 - **`--no-ssh`フラグ**: JSONに `ssh_host` があってもコマンドライン指定で手動起動モードに切り替え可能。
 - **`--source`自動導出**: `--ssh-host` 定義時に `--source` 未指定なら `tcp://{ssh_host}:8888` を自動設定。
 - **EXIF強化**: `--rpicam-cmd` から `--shutter`/`--gain` をパースしてJPEG `ExposureTime`・`UserComment`に埋め込む。
-- **`imx585.json`作成**: SSH設定を含むプロファイル。ワンコマンド起動用。
+- **`imx585.json`作成**: SSH設定を含むプロファイル。ワンコマンド起動用（その後 `config/` 配下に再編成され、現在は `config/nebula_imx585.json` 等観測プラン単位に分割）。
 
 #### 2026/08/25 raw_live_stack.py: Max Frames メモリ連動クランプ
 - **`--max-frames` クランプ追加**: 解像度とOS利用可能メモリ（safety_ratio=0.5）から安全上限を自動計算。`--max-frames` が上限超過時は警告を表示しクランプする。デフォルト値100は変更なし。

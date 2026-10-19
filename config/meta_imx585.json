@@ -1,0 +1,9 @@
+{
+  "_comment": "観測機材・メタ情報 (IMX585)。自分の機材に書き換えて使う。観測プランの \"meta\": \"meta_imx585.json\" または --meta で指定すると、SER録画フォルダにコピーされる",
+  "telescope": "Telescope name",
+  "filter": "Filter name",
+  "mount": "Mount name",
+  "object": "M42",
+  "observer": "Your name",
+  "instrument": "Camera / sensor name"
+}

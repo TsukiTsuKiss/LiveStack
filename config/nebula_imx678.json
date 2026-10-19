@@ -1,0 +1,7 @@
+{
+  "_comment": "観測プラン: 星雲写真 (広角) -> host=host_raspi_zero2w_2.json(IP/SSH), sensor=sensor_imx678.json, meta=meta_imx678.json",
+  "host": "host_raspi_zero2w_2.json",
+  "sensor": "sensor_imx678.json",
+  "meta": "meta_imx678.json",
+  "object": "M42"
+}

@@ -2651,6 +2651,12 @@ def build_arg_parser():
                         help="Pi側で実行するrpicam-rawコマンド。--listen/-oは自動補完される")
     parser.add_argument("--no-ssh", action="store_true",
                         help="SSH自動起動を無効化。設定ファイルのssi_hostの指定を上書きする")
+    parser.add_argument("--telescope", type=str, default=None, help="観測メタ: 鏡筒名 (metaファイルの値を上書き)")
+    parser.add_argument("--filter", type=str, default=None, help="観測メタ: フィルター名 (metaファイルの値を上書き)")
+    parser.add_argument("--mount", type=str, default=None, help="観測メタ: 赤道儀名 (metaファイルの値を上書き)")
+    parser.add_argument("--object", type=str, default=None, help="観測メタ: 観測対象名 (例: M42。metaファイルを編集せず都度指定できる)")
+    parser.add_argument("--observer", type=str, default=None, help="観測メタ: 観測者名 (metaファイルの値を上書き)")
+    parser.add_argument("--instrument", type=str, default=None, help="観測メタ: カメラ/センサー名 (metaファイルの値を上書き)")
     return parser
 
 
@@ -2658,25 +2664,30 @@ _OBS_META_KEYS = ("telescope", "filter", "mount", "object", "observer", "instrum
 
 
 def _load_config(path):
-    """設定JSONを読み込んでdictを返す。metaキーがあれば別ファイルをマージする。"""
+    """設定JSONを再帰的に読み込んでdictを返す。
+    meta=観測機材メタ情報、host=ラズパイ個体依存(IP/SSH)、sensor=センサー依存(RAW形式等)を
+    子ファイルとして持てる(観測用.json -> host.json -> sensor.json)。
+    子ファイルは継承元(優先度低)、自ファイルの明示値が優先度高。
+    """
     try:
         with open(path, "r", encoding="utf-8") as f:
             cfg = json.load(f)
     except Exception as e:
         print(f"[config] 読み込み失敗: {path}  ({e})")
         return {}
-    meta_path = cfg.get("meta")
-    if meta_path:
-        base_dir = os.path.dirname(os.path.abspath(path))
-        meta_abs = os.path.join(base_dir, meta_path)
-        try:
-            with open(meta_abs, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-            cfg.update({k: v for k, v in meta.items() if not k.startswith("_")})
-            print(f"[config] meta読み込み: {meta_abs}")
-        except Exception as e:
-            print(f"[config] meta読み込み失敗: {meta_abs}  ({e})")
-    return cfg
+    base_dir = os.path.dirname(os.path.abspath(path))
+    merged = {}
+    for sub_key, label in (("sensor", "sensor"), ("host", "host"), ("meta", "meta")):
+        sub_path = cfg.get(sub_key)
+        if not sub_path:
+            continue
+        sub_abs = os.path.join(base_dir, sub_path)
+        sub_cfg = _load_config(sub_abs)
+        if sub_cfg:
+            merged.update({k: v for k, v in sub_cfg.items() if not k.startswith("_")})
+            print(f"[config] {label}読み込み: {sub_abs}")
+    merged.update(cfg)
+    return merged
 
 
 def _save_config(path, args):
@@ -2714,6 +2725,10 @@ def main():
                         action.required = False
             parser.set_defaults(**cfg)
             print(f"[config] 読み込み: {pre_args.config}")
+            if "source" not in cfg and "ssh_host" not in cfg:
+                print(f"[config] 警告: {pre_args.config} に source/ssh_host がありません。"
+                      f"sensor専用など下位階層のファイルを直接指定していませんか？ "
+                      f"観測プラン用のトップファイル(host参照を含む)を指定してください")
 
     # --meta はコマンドライン指定が config の "meta" キーより優先
     if pre_args.meta:

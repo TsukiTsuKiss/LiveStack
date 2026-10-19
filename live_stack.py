@@ -8,11 +8,13 @@ LiveStack機能付きカメラプレビューアプリケーション
 import sys
 import os
 import argparse
+import re
 sys.path.append(os.path.join(os.path.dirname(__file__), 'common'))
 
 from hist_overlay import draw_hist_ccdf_overlay
 from display_utils import clamp, decode_key, draw_info_lines, fit_display_frame, get_screen_size
 from ui_menus import ControlMenu, ScreenRecorder, SettingsMenu, route_control_key, toggle_settings_menu
+from config_loader import load_config, ssh_start_rpicam, ssh_kill_rpicam
 import cv2
 import numpy as np
 import time
@@ -83,6 +85,22 @@ def parse_source_arg(source_arg):
     if stripped.isdigit():
         return int(stripped)
     return stripped
+
+
+def parse_tcp_port(source, default=8888):
+    """tcp://host:port からportを取り出す（失敗時はdefault）"""
+    try:
+        return int(source.rsplit(":", 1)[1])
+    except (ValueError, IndexError):
+        return default
+
+
+def parse_rpicam_cmd_port(cmd, default=None):
+    """rpicam-vidコマンド文字列の -o tcp://.../PORT からportを取り出す（見つからなければdefault）"""
+    if not cmd:
+        return default
+    m = re.search(r"-o\s+tcp://[^:\s]+:(\d+)", cmd)
+    return int(m.group(1)) if m else default
 
 class LiveStack:
     """LiveStack処理クラス"""
@@ -636,14 +654,16 @@ class LiveUi:
         return opened
 
 
-def run_stream_mode(source, args):
-    """URL/カメラ番号ソースでLiveStackを実行（picamera2不要）"""
+def run_stream_mode(source, args, ssh_info=None):
+    """URL/カメラ番号ソースでLiveStackを実行（picamera2不要）。ssh_info=(client, pid, ssh_host)があれば終了時にSSH停止する。"""
     print(f"Live Stack - Source: {source}")
     print("操作: [q]終了 [m]設定メニュー [c]操作メニュー [s]PNG [j]JPEG [f]FITS [y]画面録画 [t]スタックON/OFF [r]リセット [i]情報表示 [h]左右反転 [v]上下反転")
 
     cap = open_capture(source)
     if not cap.isOpened():
         print(f"ソースを開けませんでした: {source}")
+        if ssh_info:
+            ssh_kill_rpicam(ssh_info[0], ssh_info[1], ssh_info[2], proc_name="rpicam-vid")
         return
 
     live_stack = LiveStack(max_frames=args.max_frames)
@@ -690,6 +710,8 @@ def run_stream_mode(source, args):
         ui.screen_rec.stop("終了につき保存")
         cap.release()
         cv2.destroyAllWindows()
+        if ssh_info:
+            ssh_kill_rpicam(ssh_info[0], ssh_info[1], ssh_info[2], proc_name="rpicam-vid")
         print("Live Stack終了")
 
 
@@ -699,17 +721,51 @@ def main():
                         help="最大スタックフレーム数 (デフォルト: 100)")
     parser.add_argument("--source", type=str, default=None,
                         help="映像ソース。例: 0 または tcp://192.168.1.17:8888")
+    parser.add_argument("--config", type=str, default=None,
+                        help="host JSONを読み込み source/ssh_host等を設定 (例: config/host_raspi_3.json)")
+    parser.add_argument("--ssh-host", type=str, default=None, help="SSH接続先ホスト。指定時にPi側でrpicam-vidを自動起動")
+    parser.add_argument("--ssh-user", type=str, default="pi", help="SSHユーザー名 (デフォルト: pi)")
+    parser.add_argument("--ssh-key", type=str, default="~/.ssh/id_rsa", help="SSH秘密鍵パス (デフォルト: ~/.ssh/id_rsa)")
+    parser.add_argument("--rpicam-vid-cmd", type=str, default=None, help="Pi側で実行するrpicam-vidコマンド。--listen/-oは自動補完される")
+    parser.add_argument("--no-ssh", action="store_true", help="SSH自動起動を無効化")
     parser.add_argument("--flip-h", action="store_true",
                         help="左右反転して起動")
     parser.add_argument("--flip-v", action="store_true",
                         help="上下反転して起動")
     parser.add_argument("--screen-fps", type=float, default=15.0,
                         help="画面録画([y]キー/操作メニュー)のフレームレート (デフォルト: 15)")
+
+    pre, _ = parser.parse_known_args()
+    if pre.config:
+        cfg = load_config(pre.config)
+        if cfg:
+            parser.set_defaults(**{k: v for k, v in cfg.items() if not k.startswith("_") and k not in ("sensor", "host", "meta")})
+            print(f"[config] 読み込み: {pre.config}")
+
     args = parser.parse_args()
+
+    if args.no_ssh:
+        args.ssh_host = None
+
+    ssh_info = None
+    if args.ssh_host:
+        if not args.rpicam_vid_cmd:
+            parser.error("--ssh-host 指定時は --rpicam-vid-cmd も必須です")
+        # rpicam_vid_cmd の -o tcp://.../PORT を優先する(rpicam-raw用sourceとポートが異なるため)
+        cmd_port = parse_rpicam_cmd_port(args.rpicam_vid_cmd)
+        port = cmd_port if cmd_port is not None else parse_tcp_port(args.source)
+        args.source = f"tcp://{args.ssh_host}:{port}"
+        client, pid = ssh_start_rpicam(args.ssh_host, args.ssh_user, args.ssh_key, args.rpicam_vid_cmd, port, log_name="rpicam_vid")
+        ssh_info = (client, pid, args.ssh_host)
+        print(f"[SSH] --source を {args.source} に設定")
+        print("[SSH] rpicam-vid 起動待ち (2秒)...")
+        time.sleep(2)
+    elif args.source is None:
+        parser.error("--source または --config に source、もしくは --ssh-host を指定してください")
 
     parsed_source = parse_source_arg(args.source)
     if parsed_source is not None:
-        run_stream_mode(parsed_source, args)
+        run_stream_mode(parsed_source, args, ssh_info=ssh_info)
         return
 
     # source未指定時は従来のpicamera2経路を試す。利用不可ならWindows向けにUSBカメラ(0)へフォールバック。
