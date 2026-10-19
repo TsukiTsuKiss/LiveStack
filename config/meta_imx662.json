@@ -1,0 +1,9 @@
+{
+  "_comment": "観測機材・メタ情報 (IMX662 + 魚眼)。自分の機材に書き換えて使う。観測プランの \"meta\": \"meta_imx662.json\" または --meta で指定すると、SER録画フォルダにコピーされる",
+  "telescope": null,
+  "filter": null,
+  "mount": null,
+  "object": "meteor",
+  "observer": "tsuki",
+  "instrument": "Camera / imx662 Fisheye"
+}
