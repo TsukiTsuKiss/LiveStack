@@ -3,7 +3,7 @@
   "telescope": "Telescope name",
   "filter": "Filter name",
   "mount": "Mount name",
-  "object": "M42",
+  "object": "Mxx",
   "observer": "Your name",
-  "instrument": "Camera / sensor name"
+  "instrument": "Camera / imx585"
 }
