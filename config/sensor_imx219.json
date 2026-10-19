@@ -1,5 +1,5 @@
 {
-  "_comment": "センサー依存設定 (Pi Zero W + IMX219)",
+  "_comment": "センサー依存設定 (IMX219)",
   "width": 3280,
   "height": 2464,
   "raw_width": 3280,

@@ -101,9 +101,12 @@
 camera-live/
 ├── live_stack.py         # LiveStack機能付きプレビュー（カメラ直結/URL対応）
 ├── raw_live_stack.py     # rpicam-raw TCP受信 + LiveStack（RAW専用）
+├── config.json           # 既定の観測プラン（config/ のhost/sensor/metaを参照）
+├── config/               # host_* / sensor_* / meta_* / 観測プランのJSON（下記「設定ファイル」参照）
 ├── 動作実績.md            # 機材ごとの送受信コマンド実績
 ├── common/
 │   ├── camera_config.py  # 共通カメラ設定
+│   ├── config_loader.py  # config階層(sensor/host/meta)の読み込みとSSHでのrpicam起動・停止
 │   ├── display_utils.py  # 表示ユーティリティ
 │   ├── hist_overlay.py   # ヒストグラム+CCDFオーバーレイ
 │   ├── ui_menus.py       # 設定メニュー・操作メニュー・画面録画（両アプリ共通）
@@ -426,6 +429,41 @@ Live Stackモードでは以下の形式で画像を保存できます。
 - JPEG保存時にEXIFデータが正しく付与されるよう修正済み。
 - PNG保存時にはEXIFデータは付与されませんが、保存時に画面表示の文字が含まれないよう対応済み。
 - FITS保存では情報表示テキストが除外され、純粋な画像データのみを保存。
+- FITSヘッダーは標準ASCIIのみ許容されるため、メタ情報（`object` 等）に日本語を入れるとその項目は警告を出して書き込まれない（JPEGのEXIFも同様にASCII推奨）。
+- JPEGのEXIF `Model` タグにはメタ情報の `instrument` が入る。
+
+## 設定ファイル（config/）
+
+観測計画は「観測プラン」を起点に、ホスト・センサー・メタ情報のJSONを参照して組み立てる。`--config` に渡すのは観測プラン（または `config.json`）。
+
+```
+観測プラン (config/meteor_imx708.json)   ← --config で指定
+  ├─ host:   host_raspi_3_2.json   ラズパイ個体 (IP / SSH / rpicam_vid_cmd)
+  ├─ sensor: sensor_imx708.json    センサー (解像度 / bits / bayer / stride / rpicam_cmd / WB)
+  └─ meta:   meta_imx708.json      ファイルに書く観測情報 (telescope / object / instrument ...)
+```
+
+- マージ順: sensor → host → meta → 観測プラン自身（後ろが優先）。画角だけ変えたい場合は観測プランに width/height/rpicam_cmd を書いて上書きする（例: `planet_imx219.json`）。
+- 優先度: コマンドライン引数 > 観測プラン > host / sensor / meta。`--object "M42"` などで観測対象を都度上書きできる（metaファイルを編集しなくてよい）。
+- 命名規則: `host_<個体>.json` / `sensor_<型番>.json` / `meta_<型番>.json` / `<目的>_<型番>.json`（観測プラン）。
+- sensor 専用ファイルなど下位のファイルを `--config` に直接渡すと `source` / `ssh_host` が無いため起動できない（警告を出す）。
+- `config/` から相互参照するときは同じフォルダ内のファイル名だけでよい。`config.json`（ルート直下）からは `config/xxx.json` と書く。
+- SSHは鍵認証のみ。新しいPiには公開鍵を登録しておく（`cat ~/.ssh/id_rsa.pub | ssh <user>@<ip> "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"`）。
+
+| 種別 | ファイル | 内容 |
+| --- | --- | --- |
+| ホスト | `host_raspi_3.json` | Pi 3（IMX219を搭載） |
+| ホスト | `host_raspi_3_2.json` | Pi 3 、2台目（IMX708を搭載） |
+| ホスト | `host_raspi_zero2w.json` | Pi Zero 2 W（IMX585を搭載） |
+| ホスト | `host_raspi_zero2w_2.json` | Pi Zero 2 W 、2台目（IMX678を搭載） |
+| センサー | `sensor_imx219.json` / `sensor_imx585.json` / `sensor_imx678.json` / `sensor_imx708.json` | RAW形式・解像度・rpicam_cmd・初期WB等 |
+| メタ | `meta_imx219.json` / `meta_imx585.json` / `meta_imx678.json` / `meta_imx708.json` | telescope / filter / mount / object / observer / instrument |
+| 観測プラン | `meteor_imx219.json` / `meteor_imx708.json` | 流星観測 |
+| 観測プラン | `planet_imx219.json` | 惑星観測（640x480 に縮小して高フレームレート） |
+| 観測プラン | `nebula_imx585.json` / `nebula_imx678.json` | 星雲写真 |
+| 既定 | `config.json`（ルート直下） | `--config` 省略時の既定。host_raspi_zero2w + sensor_imx585 の観測プラン |
+
+新しい機材を足す手順: ① `host_*.json`（IP/SSH）② `sensor_*.json`（動作実績.mdの成功例を元に解像度/bits/bayer/stride/rpicam_cmd）③ `meta_*.json` ④ 観測プランを作る。
 
 ## 実行方法
 
