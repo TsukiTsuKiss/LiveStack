@@ -456,18 +456,32 @@ Live Stackモードでは以下の形式で画像を保存できます。
 | ホスト | `host_raspi_3_2.json` | Pi 3 、2台目（IMX708を搭載） |
 | ホスト | `host_raspi_4.json` | Pi 4（IMX662＋魚眼を搭載） |
 | ホスト | `host_raspi_4_2.json` | Pi 4 、2台目（IMX327を搭載） |
+| ホスト | `host_raspi_4_3.json` | Pi 4 、3台目（IMX462＋魚眼を搭載） |
+| ホスト | `host_raspi_5.json` | Pi 5（IMX477＋魚眼を搭載） |
 | ホスト | `host_raspi_zero2w.json` | Pi Zero 2 W（IMX585を搭載） |
 | ホスト | `host_raspi_zero2w_2.json` | Pi Zero 2 W 、2台目（IMX678を搭載） |
-| センサー | `sensor_imx219.json` / `sensor_imx327.json` / `sensor_imx585.json` / `sensor_imx662.json` / `sensor_imx678.json` / `sensor_imx708.json` | RAW形式・解像度・rpicam_cmd（raw_live_stack用）・rpicam_vid_cmd（live_stack用）・初期WB等 |
-| メタ | `meta_imx219.json` / `meta_imx327.json` / `meta_imx585.json` / `meta_imx662.json` / `meta_imx678.json` / `meta_imx708.json` | telescope / filter / mount / object / observer / instrument |
-| 観測プラン | `meteor_imx219.json` / `meteor_imx327.json` / `meteor_imx662.json` / `meteor_imx708.json` | 流星観測 |
+| センサー | `sensor_imx219.json` / `sensor_imx327.json` / `sensor_imx462.json` / `sensor_imx477.json` / `sensor_imx585.json` / `sensor_imx662.json` / `sensor_imx678.json` / `sensor_imx708.json` | RAW形式・解像度・rpicam_cmd（raw_live_stack用）・rpicam_vid_cmd（live_stack用）・初期WB等 |
+| メタ | `meta_imx219.json` / `meta_imx327.json` / `meta_imx462.json` / `meta_imx477.json` / `meta_imx585.json` / `meta_imx662.json` / `meta_imx678.json` / `meta_imx708.json` | telescope / filter / mount / object / observer / instrument |
+| 観測プラン | `meteor_imx219.json` / `meteor_imx327.json` / `meteor_imx462.json` / `meteor_imx477.json` / `meteor_imx662.json` / `meteor_imx708.json` | 流星観測 |
 | 観測プラン | `planet_imx219.json` | 惑星観測（640x480 に縮小して高フレームレート） |
+| 観測プラン | `fullres_imx477.json` | IMX477 を本来の解像度（4056x3040）で撮影（`meteor_imx477.json` はビニング2028x1520） |
 | 観測プラン | `nebula_imx585.json` / `nebula_imx678.json` | 星雲写真 |
 | 既定 | `config.json`（ルート直下） | `--config` 省略時の既定。host_raspi_zero2w + sensor_imx585 の観測プラン |
 
 新しい機材を足す手順: ① `host_*.json`（IP/SSH）② `sensor_*.json`（動作実績.mdの成功例を元に解像度/bits/bayer/stride/rpicam_cmd）③ `meta_*.json` ④ 観測プランを作る。
 
-IMX327 / IMX462 は IMX290 の上位互換で、Pi 側の `/boot/firmware/config.txt` に `camera_auto_detect=0` と `dtoverlay=imx290` を入れて使う（`sensor_imx327.json` を共用できる）。この設定は動作実績が無い仮値（形式は 12bit packed・stride 2880、rpicam-raw のログは SRGGB だが実際の Bayer は BGGR、WB は白壁で取った値、露出は未調整）。
+#### IMX290 / IMX327 / IMX462 を使うとき（Pi 側の準備）
+
+3つとも同じ `imx290` ドライバで動くため、Pi 側の `/boot/firmware/config.txt`（古いOSでは `/boot/config.txt`）は共通で、カメラの自動検出を切って `imx290` のオーバーレイを指定する。
+
+```
+camera_auto_detect=0
+dtoverlay=imx290
+```
+
+書き換えたら再起動する。`rpicam-raw` のログには、センサーが `imx290` として出る。
+
+`sensor_imx327.json` が IMX327 の例。IMX290 / IMX462 は、ここから始めてよいが、Bayer の並び・形式・ホワイトバランスは機種ごとに確認する（IMX327 は `rpicam-raw` のログが `SRGGB` でも実際は `BGGR` だった）。この設定は IMX327（Pi 4）と IMX462（Pi 4）で動作を確認済み（形式は 12bit packed・stride 2880、WB は白壁で取った値、露出は未調整。送受信コマンドは動作実績.md）。
 
 ## 実行方法
 

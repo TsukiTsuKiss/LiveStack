@@ -1,0 +1,7 @@
+{
+  "_comment": "観測プラン: 流星観測 (魚眼) (Pi 4 + IMX462) -> host=host_raspi_4_3.json(IP/SSH), sensor=sensor_imx462.json, meta=meta_imx462.json",
+  "host": "host_raspi_4_3.json",
+  "sensor": "sensor_imx462.json",
+  "meta": "meta_imx462.json",
+  "object": "meteor"
+}
