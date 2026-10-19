@@ -438,8 +438,8 @@ Live Stackモードでは以下の形式で画像を保存できます。
 
 ```
 観測プラン (config/meteor_imx708.json)   ← --config で指定
-  ├─ host:   host_raspi_3_2.json   ラズパイ個体 (IP / SSH / rpicam_vid_cmd)
-  ├─ sensor: sensor_imx708.json    センサー (解像度 / bits / bayer / stride / rpicam_cmd / WB)
+  ├─ host:   host_raspi_3_2.json   ラズパイ個体 (IP / SSH)
+  ├─ sensor: sensor_imx708.json    センサー (解像度 / bits / bayer / stride / rpicam_cmd / rpicam_vid_cmd / WB)
   └─ meta:   meta_imx708.json      ファイルに書く観測情報 (telescope / object / instrument ...)
 ```
 
@@ -458,7 +458,7 @@ Live Stackモードでは以下の形式で画像を保存できます。
 | ホスト | `host_raspi_4_2.json` | Pi 4 、2台目（IMX327を搭載） |
 | ホスト | `host_raspi_zero2w.json` | Pi Zero 2 W（IMX585を搭載） |
 | ホスト | `host_raspi_zero2w_2.json` | Pi Zero 2 W 、2台目（IMX678を搭載） |
-| センサー | `sensor_imx219.json` / `sensor_imx327.json` / `sensor_imx585.json` / `sensor_imx662.json` / `sensor_imx678.json` / `sensor_imx708.json` | RAW形式・解像度・rpicam_cmd・初期WB等 |
+| センサー | `sensor_imx219.json` / `sensor_imx327.json` / `sensor_imx585.json` / `sensor_imx662.json` / `sensor_imx678.json` / `sensor_imx708.json` | RAW形式・解像度・rpicam_cmd（raw_live_stack用）・rpicam_vid_cmd（live_stack用）・初期WB等 |
 | メタ | `meta_imx219.json` / `meta_imx327.json` / `meta_imx585.json` / `meta_imx662.json` / `meta_imx678.json` / `meta_imx708.json` | telescope / filter / mount / object / observer / instrument |
 | 観測プラン | `meteor_imx219.json` / `meteor_imx327.json` / `meteor_imx662.json` / `meteor_imx708.json` | 流星観測 |
 | 観測プラン | `planet_imx219.json` | 惑星観測（640x480 に縮小して高フレームレート） |
@@ -514,7 +514,7 @@ python raw_live_stack.py --source tcp://192.168.1.17:8888 --bits 12 --bayer BGGR
 
 ### `--config` によるホスト設定の共用・SSH自動起動（ピント合わせ用）
 
-`live_stack.py` も `raw_live_stack.py` と同じ `config/host_*.json`（`sensor`/`meta`参照込みの観測プランJSONも可）を `--config` で読み込め、`source`/`ssh_host`/`ssh_user`/`ssh_key`/`rpicam_vid_cmd` を引き継げます。host JSONに `rpicam_vid_cmd` を記載しておけば、SSH経由でPi側の `rpicam-vid` をワンコマンドで自動起動・終了できます（`raw_live_stack.py` の `rpicam-raw` 用ポートとは別ポートを使う想定。既定サンプルはポート8889）。
+`live_stack.py` も `raw_live_stack.py` と同じ観測プランJSON（または host／sensor 単体を含む構成）を `--config` で読み込み、`source`/`ssh_host`/`ssh_user`/`ssh_key`/`rpicam_vid_cmd` を引き継げます。`rpicam_vid_cmd` は解像度や `--vflip --hflip` がセンサーごとに違うため `sensor_*.json` に置き、`rpicam_cmd`（raw用）とは別に管理します（観測プランで上書きも可）。設定しておけば、SSH経由でPi側の `rpicam-vid` をワンコマンドで自動起動・終了できます（`rpicam-raw` 用の8888とは別ポート。既定サンプルは8889）。コマンドラインの `--rpicam-vid-cmd` でも上書きできます。
 
 ```bash
 # 観測プランJSON(host/sensor/meta継承)でそのままピント合わせプレビューを起動

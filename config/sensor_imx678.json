@@ -35,5 +35,6 @@
   "zoom_click_size": 128,
   "zoom_corner": "br",
   "rpicam_cmd": "rpicam-raw --width 3840 --height 2160 --framerate 0.3 --shutter 600000 --gain 1 -t 0 --listen -o tcp://0.0.0.0:8888",
+  "rpicam_vid_cmd": "rpicam-vid -t 0 -n --width 1280 --height 720 --framerate 15 --codec h264 --listen -o tcp://0.0.0.0:8889 --bitrate 5000000",
   "no_ssh": false
 }
