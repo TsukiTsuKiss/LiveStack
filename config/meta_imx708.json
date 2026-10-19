@@ -1,0 +1,9 @@
+{
+  "_comment": "観測機材・メタ情報 (IMX708)。自分の機材に書き換えて使う。観測プランの \"meta\": \"meta_imx708.json\" または --meta で指定すると、SER録画フォルダにコピーされる",
+  "telescope": null,
+  "filter": null,
+  "mount": null,
+  "object": "Mxx",
+  "observer": "tsuki",
+  "instrument": "Camera / imx708"
+}

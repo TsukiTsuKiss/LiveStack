@@ -1,0 +1,7 @@
+{
+  "_comment": "観測プラン: 流星観測 (Pi 3 + IMX708) -> host=host_raspi_3_2.json(IP/SSH), sensor=sensor_imx708.json, meta=meta_imx708.json",
+  "host": "host_raspi_3_2.json",
+  "sensor": "sensor_imx708.json",
+  "meta": "meta_imx708.json",
+  "object": "meteor"
+}
