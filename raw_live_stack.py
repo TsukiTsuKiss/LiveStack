@@ -235,6 +235,9 @@ def _make_exif_bytes(frame_count, effective_bits, bayer_name, wb_gains, gamma_va
             piexif.ExifIFD.UserComment: b"ASCII\x00\x00\x00" + meta.encode("ascii", errors="replace"),
         },
     }
+    if instrument and instrument.isascii():
+        # ModelはEXIF標準のカメラ機種名タグ。ビューアのカメラ情報欄に表示される
+        exif_dict["0th"][piexif.ImageIFD.Model] = instrument.encode("ascii")
     if shutter_us is not None:
         exif_dict["Exif"][piexif.ExifIFD.ExposureTime] = (int(shutter_us), 1_000_000)
     return piexif.dump(exif_dict)
@@ -1062,6 +1065,14 @@ def save_ser(frames, filename, bayer_key, bits, width, height, lsb=False):
     print(f"[save] SER: {filename}  frames={len(frames)}  {width}x{height} {bits}bit {bayer_key}")
 
 
+def _ascii_safe_header_value(key, value):
+    """FITSヘッダーは標準印字可能ASCIIのみ許容されるため、非ASCII文字列は警告を出して除外する。"""
+    if isinstance(value, str) and not value.isascii():
+        print(f"[warn] FITSヘッダー {key} は非ASCII文字を含むため書き込みをスキップします: {value!r}")
+        return None
+    return value
+
+
 def save_fits(image, filename, metadata):
     """FITS形式でRGB画像を保存"""
     try:
@@ -1080,7 +1091,9 @@ def save_fits(image, filename, metadata):
 
     # メタデータをヘッダーに追加
     for key, value in metadata.items():
-        header[key] = value
+        safe_value = _ascii_safe_header_value(key, value)
+        if safe_value is not None:
+            header[key] = safe_value
 
     # NAXIS3を色数として設定
     if len(image.shape) == 3:
@@ -1099,8 +1112,11 @@ def save_fits_bayer_f32(image, filename, metadata):
         return
     hdu = fits.PrimaryHDU(np.asarray(image, dtype=np.float32))
     for key, value in metadata.items():
-        if key != "BITPIX":  # BITPIXはFITSの予約キーのため使わない
-            hdu.header[key] = value
+        if key == "BITPIX":  # BITPIXはFITSの予約キーのため使わない
+            continue
+        safe_value = _ascii_safe_header_value(key, value)
+        if safe_value is not None:
+            hdu.header[key] = safe_value
     hdu.writeto(filename, overwrite=True)
     print(f"FITSファイル保存(float32 Bayer): {filename}")
 
