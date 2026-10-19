@@ -1,7 +1,0 @@
-{
-  "_comment": "観測プラン: 流星観測 (魚眼) (Pi 5 + IMX477) -> host=host_raspi_5.json(IP/SSH), sensor=sensor_imx477.json, meta=meta_imx477.json",
-  "host": "host_raspi_5.json",
-  "sensor": "sensor_imx477.json",
-  "meta": "meta_imx477.json",
-  "object": "meteor"
-}

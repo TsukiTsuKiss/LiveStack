@@ -445,7 +445,7 @@ Live Stackモードでは以下の形式で画像を保存できます。
 
 - マージ順: sensor → host → meta → 観測プラン自身（後ろが優先）。画角だけ変えたい場合は観測プランに width/height/rpicam_cmd を書いて上書きする（例: `planet_imx219.json`）。
 - 優先度: コマンドライン引数 > 観測プラン > host / sensor / meta。`--object "M42"` などで観測対象を都度上書きできる（metaファイルを編集しなくてよい）。
-- 命名規則: `host_<個体>.json` / `sensor_<型番>.json` / `meta_<型番>.json` / `<目的>_<型番>.json`（観測プラン）。
+- 命名規則: `host_<個体>.json` / `sensor_<型番>.json` / `meta_<型番>.json` / `<目的>_<型番>.json`（観測プラン。同じ目的・型番を複数の Pi で使うときは `_pi4` のように Pi の世代を付ける）。
 - sensor 専用ファイルなど下位のファイルを `--config` に直接渡すと `source` / `ssh_host` が無いため起動できない（警告を出す）。
 - `config/` から相互参照するときは同じフォルダ内のファイル名だけでよい。`config.json`（ルート直下）からは `config/xxx.json` と書く。
 - SSHは鍵認証のみ。新しいPiには公開鍵を登録しておく（`cat ~/.ssh/id_rsa.pub | ssh <user>@<ip> "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"`）。
@@ -457,14 +457,40 @@ Live Stackモードでは以下の形式で画像を保存できます。
 | ホスト | `host_raspi_4.json` | Pi 4（IMX662＋魚眼を搭載） |
 | ホスト | `host_raspi_4_2.json` | Pi 4 、2台目（IMX327を搭載） |
 | ホスト | `host_raspi_4_3.json` | Pi 4 、3台目（IMX462＋魚眼を搭載） |
+| ホスト | `host_raspi_4_4.json` / `host_raspi_4_5.json` | Pi 4 、4台目・5台目（どちらもIMX477を搭載） |
 | ホスト | `host_raspi_5.json` | Pi 5（IMX477＋魚眼を搭載） |
 | ホスト | `host_raspi_zero2w.json` | Pi Zero 2 W（IMX585を搭載） |
 | ホスト | `host_raspi_zero2w_2.json` | Pi Zero 2 W 、2台目（IMX678を搭載） |
 | センサー | `sensor_imx219.json` / `sensor_imx327.json` / `sensor_imx462.json` / `sensor_imx477.json` / `sensor_imx585.json` / `sensor_imx662.json` / `sensor_imx678.json` / `sensor_imx708.json` | RAW形式・解像度・rpicam_cmd（raw_live_stack用）・rpicam_vid_cmd（live_stack用）・初期WB等 |
 | メタ | `meta_imx219.json` / `meta_imx327.json` / `meta_imx462.json` / `meta_imx477.json` / `meta_imx585.json` / `meta_imx662.json` / `meta_imx678.json` / `meta_imx708.json` | telescope / filter / mount / object / observer / instrument |
-| 観測プラン | `meteor_imx219.json` / `meteor_imx327.json` / `meteor_imx462.json` / `meteor_imx477.json` / `meteor_imx662.json` / `meteor_imx708.json` | 流星観測 |
+| 観測プラン | `meteor_imx219.json` / `meteor_imx327.json` / `meteor_imx462.json` / `meteor_imx477_pi4.json` / `meteor_imx477_pi5.json` / `meteor_imx662.json` / `meteor_imx708.json` | 流星観測 |
 | 観測プラン | `planet_imx219.json` | 惑星観測（640x480 に縮小して高フレームレート） |
-| 観測プラン | `fullres_imx477.json` | IMX477 を本来の解像度（4056x3040）で撮影（`meteor_imx477.json` はビニング2028x1520） |
+| 観測プラン | `fullres_imx477_pi5.json` | IMX477 を本来の解像度（4056x3040）で撮影（`meteor_imx477_pi5.json` はビニング2028x1520） |
+
+#### どの値をどこに書くか（なぜ観測プランに書く値があるのか）
+
+| ファイル | 書くもの |
+| --- | --- |
+| `host_*.json` | Pi 個体への接続情報（IP / SSH） |
+| `sensor_*.json` | センサーの型番で決まる値（Bayer、解像度、クロップ、停止しきい値など） |
+| `meta_*.json` | ファイルに書く観測情報 |
+| 観測プラン | 目的と、**Pi の世代やカメラ個体で決まる値**（RAW 形式 `wire_format`/`bits`/`stride`、`rpicam_cmd`、ホワイトバランス） |
+
+同じ型番のセンサーでも、次の値は型番では決まらない。IMX477 を Pi 4 と Pi 5 で使ったときの実例で示す。
+
+| 項目 | Pi 4 | Pi 5 |
+| --- | --- | --- |
+| RAW 形式 | 12bit パック（`12p`、stride 3072） | 非圧縮（`12u`、stride 4096） |
+| `rpicam-raw` の `--mode` | `2028:1520:12:P` | `2028:1520:12:U` |
+| WB（B / G / R） | 1.87 / 1.00 / 1.28 | 1.35 / 1.00 / 2.45 |
+
+- **RAW 形式は Pi の世代で決まる。** Pi 5 は `--mode` を無指定だと独自圧縮形式（`BGGR_PISP_COMP1`）を出し、この受信側では読めない。そこで非圧縮の `:U` を指定する。Pi 5 は行の幅を64バイト単位に揃える（2028画素×2バイトは 4056 → 4096）。`12u` プリセットの stride 補完は32バイト単位（4064）で一致しないため、Pi 5 では stride を明示する。
+- **WB はカメラ個体で決まる。** 同じ IMX477 でも、レンズや赤外線カットの違いで値が大きく変わる。
+
+そのため `sensor_imx477.json` には型番で決まる値だけを置き、上の表の値は `meteor_imx477_pi4.json` と `meteor_imx477_pi5.json` に書いている。`host` は「IP と SSH」だけに保ち、センサー設定のファイル名に Pi の世代が混ざらないようにした。
+
+- 目安: あるセンサーを1つの Pi 世代・1個体でしか使わないなら、他の `sensor_*.json` のようにセンサー設定にまとめてよい。複数の世代・個体で使うことになったら、観測プランに寄せる（IMX708 も Pi 3 と Pi 5 で形式が違う）。
+- 注意: 観測プランは別の観測プランを引き継げない。同じ Pi で解像度だけ違うプラン（`fullres_imx477_pi5.json`）は、`wire_format`/`bits`/WB を再掲している。WB を変えたときは両方を直す。
 | 観測プラン | `nebula_imx585.json` / `nebula_imx678.json` | 星雲写真 |
 | 既定 | `config.json`（ルート直下） | `--config` 省略時の既定。host_raspi_zero2w + sensor_imx585 の観測プラン |
 

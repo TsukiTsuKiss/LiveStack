@@ -1,0 +1,14 @@
+{
+  "_comment": "観測プラン: 流星観測 (魚眼) (Pi 5 + IMX477) -> host=host_raspi_5.json, sensor=sensor_imx477.json, meta=meta_imx477.json。Pi 5はrpicam-rawが既定でPISP圧縮(BGGR_PISP_COMP1)を出し読めないため非圧縮 12:U を指定。行は64バイト揃えなのでstrideは4096(補完値の4064では斜めにずれる)。Bayerはrpicam-rawログはBGGRと表示だが実際はRGGB。WBは白壁で取ったこのカメラ個体の値",
+  "host": "host_raspi_5.json",
+  "sensor": "sensor_imx477.json",
+  "meta": "meta_imx477.json",
+  "object": "meteor",
+  "wire_format": "12u",
+  "bits": 16,
+  "stride": 4096,
+  "wb_b": 1.35,
+  "wb_g": 1.0,
+  "wb_r": 2.45,
+  "rpicam_cmd": "rpicam-raw --mode 2028:1520:12:U --width 2028 --height 1520 --framerate 5 -t 0 --listen -o tcp://0.0.0.0:8888 --shutter 200000 --gain 8"
+}

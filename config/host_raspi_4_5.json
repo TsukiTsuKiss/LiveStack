@@ -1,0 +1,7 @@
+{
+  "_comment": "ホスト固有設定 (Pi 4 #5本体。IP/SSHのみ。搭載センサーは観測プラン側でsensorキー指定。SSH鍵は他Piと共用のid_rsa)",
+  "source": "tcp://192.168.1.49:8888",
+  "ssh_host": "192.168.1.49",
+  "ssh_user": "tsuki",
+  "ssh_key": "~/.ssh/id_rsa"
+}

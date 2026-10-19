@@ -1,0 +1,13 @@
+{
+  "_comment": "観測プラン: 流星観測 (魚眼) (Pi 4 + IMX477, 192.168.1.42) -> host=host_raspi_4_4.json, sensor=sensor_imx477.json, meta=meta_imx477.json。Pi 4は12bitパック(12p)で出すためRAW形式と送信コマンドをここに書く(stride 3072は12pプリセットから自動)。WBは白壁で取ったこのカメラ個体の値",
+  "host": "host_raspi_4_4.json",
+  "sensor": "sensor_imx477.json",
+  "meta": "meta_imx477.json",
+  "object": "meteor",
+  "wire_format": "12p",
+  "bits": 12,
+  "wb_b": 1.87,
+  "wb_g": 1.0,
+  "wb_r": 1.28,
+  "rpicam_cmd": "rpicam-raw --mode 2028:1520:12:P --width 2028 --height 1520 --framerate 5 -t 0 --listen -o tcp://0.0.0.0:8888 --shutter 200000 --gain 8"
+}
