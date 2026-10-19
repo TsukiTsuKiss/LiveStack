@@ -616,10 +616,11 @@ class LiveStack:
                 out[oy::2, ox::2] = cv2.warpAffine(plane, M, (plane.shape[1], plane.shape[0]), flags=cv2.INTER_LINEAR)
         return out
 
-    def process_stack(self, bayer_code, stretch=False):
+    def process_stack(self, bayer_code, stretch=False, should_continue=None):
         """スタック処理を実行（バッファはraw16 uint16 Bayerで保持）。
 
         stretch: sum以外の方式で、結果を自動ストレッチして8bit化する（単一フレーム相当の明るさになるため）。
+        should_continue: 呼ぶとFalseを返すと処理を静かに中断するコールバック（Stack OFF切り替えをループ中に検知するため）。
         """
         latest_index = (self.buffer_index - 1 + self.max_frames) % self.max_frames
         if self.buffer[latest_index] is None:
@@ -654,6 +655,10 @@ class LiveStack:
         cum_x = cum_y = 0.0  # 最新フレームに対する過去フレームのずれ(float)
         latest_pos = self.buffer_pos[latest_index] or (0.0, 0.0)
         for i in range(self.max_frames - 1):
+            if should_continue is not None and not should_continue():
+                # Stack OFFへ切り替わった処理途中のスタックはログを出さず静かに破棄する
+                stop_reason = "cancelled"
+                break
             past_index = (self.buffer_index - 2 - i + self.max_frames) % self.max_frames
             past_raw16 = self.buffer[past_index]
             if past_raw16 is None:
@@ -697,6 +702,9 @@ class LiveStack:
 
         if stop_reason is None:
             stop_reason = "max-frames"
+        if stop_reason == "cancelled":
+            # Stack OFFへ切り替わった処理途中の結果は使わない（stack_count等も更新しない）
+            return None
         self.stack_count = valid_stack_count
         self.stacked_raw16 = stacked  # float32 Bayer累積スタック（FITS/NPY保存用）
         self.last_stop_reason = stop_reason
@@ -1701,7 +1709,9 @@ def run_raw_live_stack(args):
 
                 _t0 = time.perf_counter()
                 try:
-                    result = live_stack.process_stack(bayer_code, stretch=auto_stretch)
+                    result = live_stack.process_stack(
+                        bayer_code, stretch=auto_stretch, should_continue=lambda: stack_enabled
+                    )
                 except Exception as e:
                     print(f"[stack worker error] {e}")
                     result = None
