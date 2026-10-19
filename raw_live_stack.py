@@ -2571,12 +2571,16 @@ def run_raw_live_stack(args):
     except KeyboardInterrupt:
         print("\n[終了]")
     finally:
-        screen_rec.stop("終了につき保存")
-        if _ser_recording:
+        # 初回フレーム受信で切断された場合など、以下の変数が未作成のまま到達することがある
+        _started = "_stack_thread" in locals()
+        if "screen_rec" in locals():
+            screen_rec.stop("終了につき保存")
+        if "_ser_recording" in locals() and _ser_recording:
             _close_ser_files("終了につき録画保存")
-        _stack_stop.set()
-        _stack_event.set()   # wait() をすぐに解除してスレッドを終了させる
-        _stack_thread.join(timeout=5.0)
+        if _started:
+            _stack_stop.set()
+            _stack_event.set()   # wait() をすぐに解除してスレッドを終了させる
+            _stack_thread.join(timeout=5.0)
         # ダークフレームの自動保存（このセッションで取得・更新したときだけ。読み込んだだけのダークは書き換えない。
         # [D]クリア後は dark_frame=None のため保存しない）
         try:
