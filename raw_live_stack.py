@@ -1699,6 +1699,7 @@ def run_raw_live_stack(args):
         _stack_stop  = threading.Event()   # スレッド停止フラグ
         _stacked_bgr = [None]              # 最新スタック結果 (BGRフレーム)
         _last_worker_frame_id = [None]     # 同一フレーム再計算を避けるための最後に処理したID
+        _stack_busy_since = [None]         # process_stack実行中の開始時刻（計算中表示用）
 
         def do_stack_reset():
             """live_stack.reset() + リングバッファ + 表示バッファのクリアを一括実行"""
@@ -1724,6 +1725,7 @@ def run_raw_live_stack(args):
                     continue
 
                 _t0 = time.perf_counter()
+                _stack_busy_since[0] = _t0
                 try:
                     result = live_stack.process_stack(
                         bayer_code, stretch=auto_stretch, should_continue=lambda: stack_enabled
@@ -1731,6 +1733,8 @@ def run_raw_live_stack(args):
                 except Exception as e:
                     print(f"[stack worker error] {e}")
                     result = None
+                finally:
+                    _stack_busy_since[0] = None
                 _t1 = time.perf_counter()
                 elapsed_ms = (_t1 - _t0) * 1000.0
                 perf_stack_ms[0] = ema(perf_stack_ms[0], elapsed_ms)
@@ -1938,6 +1942,11 @@ def run_raw_live_stack(args):
                     lines.append(
                         f"StopMode: {'include-crossing-frame' if live_stack.include_overflow_frame else 'exclude-crossing-frame'}"
                     )
+                    _busy_t0 = _stack_busy_since[0]
+                    if _busy_t0 is not None:
+                        lines.append(
+                            f"Stack: computing {time.perf_counter() - _busy_t0:.1f}s ({live_stack.stack_method})  Lag:{max(0, frame_count - int(live_stack.last_processed_frame_id or 0))}frm"
+                        )
                     if perf_input_fps[0] > 0.0 or perf_stack_hz[0] > 0.0:
                         lag_frames = 0
                         if live_stack.last_processed_frame_id is not None:
