@@ -8,10 +8,20 @@
 - **想定用途**: Sky-Watcher HAC125DX（プライムフォーカス）で、星雲・星団・銀河などの**淡い天体**を撮る。惑星や流星のような明るい・動きの速い対象は主な想定ではない。
 - **想定機材**: HAC125DX + Raspberry Pi Zero 2 W（Wi-Fi・電池駆動）+ IMX585 など。無線にしているのはケーブルによる星像の悪化を避けるため（詳しくは「目的」）。
 - **役割分担**: Pi は RAW を送るだけ。デベイヤ・スタック・ダーク減算・保存はすべて PC で行う。Pi Zero 2 W で重い処理はしない。
-- **露出とフレームレート**: 露出は1枚あたり数秒（5〜10秒程度）、送信は 0.3 fps 前後を想定。露出が長いため fps を上げても意味がなく、リアルタイム性や低遅延は目標ではない。
+- **露出とフレームレート**: 露出は1枚あたり数秒（5〜10秒程度）、送信は 0.3 fps 前後を想定。露出が長いため fps を上げても意味がなく、リアルタイム性や低遅延は目標ではない。コマンド例の `--shutter` は機材・目的ごとの値で固定ではない（`config.json` の既定は5秒）。
 - **通信量**: 4K（3840×2160）の 12bit RAW は1フレーム約12MB。0.3 fps で約30Mbps 程度。加算スタックには無圧縮の RAW が必要なので、H.264 などの圧縮ストリームは使わない。
 - **アプリ**: 本命は `raw_live_stack.py`。`live_stack.py` は補助（ピント合わせ用のプレビューや、Pi 単体の簡易スタック）。
 - **ライセンス**: コードは MIT。詳しくは「ライセンス」を参照。
+
+## クイックスタート（Pi Zero 2 W + PC）
+
+前提: Pi 側で `rpicam-hello` が動く状態になっていること。ドライバの組み込みやカメラの有効化は、このリポジトリの範囲外です。
+
+1. **PC に導入する**: Python の仮想環境を作り、`pip install -r requirements.txt` を実行する（`picamera2` は不要）。詳しくは「必要なライブラリのインストール」。
+2. **SSH の鍵を登録する**（初回のみ）: PC からパスワードなしで Pi に入れるようにする。手順は「SSH連携のセットアップ（初回のみ）」。
+3. **設定を書く**: `config/host_raspi_zero2w.json` の `ssh_host` / `source`（Pi のIP）、`ssh_user`、`ssh_key` を自分の環境に合わせる。センサーや送信コマンド（`rpicam_cmd`）は `config.json` が参照する `config/sensor_imx585.json` などに入っている。構成の考え方は「設定ファイル（config/）」。
+4. **起動する**: `python raw_live_stack.py --config config.json`。Pi 側の `rpicam-raw` は SSH で自動起動・終了される。
+5. **撮る**: 鏡筒にキャップをして `d` でダークを取得し、`f` で FITS 保存、`q` で終了する。キー操作の一覧は「操作」を参照。
 
 ## 目的
 
@@ -532,11 +542,9 @@ dtoverlay=imx290
 ## 実行方法
 
 ```bash
-# 仮想環境をアクティベート
-cd /home/tsuki/MyApps/camera-live
-source ../preview/.venv/bin/activate
+# 仮想環境を有効化してから実行（作成方法は「必要なライブラリのインストール」）
 
-# RAW TCPストリーム受信 + LiveStack
+# RAW TCPストリーム受信 + LiveStack（本命）
 python raw_live_stack.py --config config/nebula_imx585.json
 
 # SSH自動起動を使わず手動起動モードで接続
@@ -618,7 +626,7 @@ rpicam-raw --width 3840 --height 2160 --framerate 0.3 \
 
 ## 設定
 
-`common/camera_config.py`で以下を調整可能:
+`live_stack.py`（picamera2 直結モード）では、`common/camera_config.py` で以下を調整できます（`raw_live_stack.py` は「設定ファイル（config/）」のJSONで設定します）。
 - 解像度: センサーモード一覧から選択（`Size` 項目）
 - バッファサイズ
 - 露出設定
@@ -635,9 +643,9 @@ rpicam-raw --width 3840 --height 2160 --framerate 0.3 \
 ## LiveStack機能
 
 - **位置合わせ**: `raw_live_stack.py` は `phaseCorrelate` による平行移動検出（基準フレームに対する絶対位置、Bayer色面ごとのサブピクセル移動）。詳細は仕様.md を参照
-- **スタッキング**: 加算平均によるノイズ軽減
+- **スタッキング**: 既定は加算（`sum`）。比較明・中央値・シグマクリップなどは設定メニューの `Stack Method` で切り替える
 - **最大フレーム数**: デフォルト100フレーム
-- **リアルタイム処理**: フレームレートを維持
+- **更新タイミング**: 1フレーム届くたびに更新する。低fps（0.3fps前後）の運用が前提で、高fpsのリアルタイム処理は目標ではない
 
 ## 必要なライブラリのインストール
 
@@ -649,7 +657,7 @@ rpicam-raw --width 3840 --height 2160 --framerate 0.3 \
 pip install -r requirements.txt
 ```
 
-`picamera2` は Raspberry Pi 側のみ必要です（PC環境では不要）:
+`picamera2` は `live_stack.py` を Raspberry Pi 上で直結して使うときだけ必要です（`raw_live_stack.py` と PC 側では不要）:
 
 ```bash
 pip install picamera2
