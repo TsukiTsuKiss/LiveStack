@@ -139,7 +139,8 @@ camera-live/
 │   ├── focus_utils.py    # フォーカスアシストの指標計算とパネル描画（両アプリ共通）
 │   ├── hist_overlay.py   # ヒストグラム+CCDFオーバーレイ
 │   ├── ui_menus.py       # 設定メニュー・操作メニュー・画面録画（両アプリ共通）
-│   └── raw_utils.py      # RAW受信・デコード・WB/ガンマ共通処理
+│   ├── raw_utils.py      # RAW受信・デコード・WB/ガンマ共通処理
+│   └── zoom_utils.py     # ズームPiPの描画（両アプリ共通）
 ├── demo/
 │   └── make_demo.py      # デモ動画の自動生成（キー操作の自動入力 + 画面録画）
 ├── cad/                  # 筐体の3Dデータ（Fusion .f3d + STL）
@@ -282,7 +283,7 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - `S` / `x`: SER録画開始/停止トグル。`recordings/` 下の日時フォルダに `*_raw.ser`（カメラRAW）と `*_stack.ser`（スタック済み。スタックON中のみ）、使ったダーク・設定JSONを保存（`--no-rec-raw` / `--no-rec-stack` / `--no-rec-folder` で無効化可）
 - Linux の Qt 版 OpenCV では Shift が反映されないため、大文字キー（`S`/`W` 等）は使えない。`S` は `x`、`W` は `u` で代用する。`A`/`E`/`H` は設定メニューの `Align`/`Dark Sub`/`Histogram` から切替できる。他の大文字キー機能も `c` の操作メニューから実行できる
 - `z`: フォーカスアシストズーム ON/OFF（ON中にクリック/ドラッグで拡大エリアを選択）
-- `F`: フォーカス指標 ON/OFF（操作メニュー `Focus Aid`）。Zoomの切り出し領域（未選択なら画面中央）で、ピントの鋭さ（勾配RMS）を新フレームごとに計算し、現在値・ベスト・履歴グラフを表示する。ベストが最大になる位置がピント。ピークが飽和すると `SAT` と出る（露出/ゲインを下げる）。単フレームで測るのでスタックONでも使える
+- `F`: フォーカス指標 ON/OFF（操作メニュー `Focus Aid`）。Zoomの切り出し領域（未選択なら画面中央）で、ピントの鋭さ（勾配RMS）を新フレームごとに計算し、現在値・ベスト・履歴グラフを表示する。ベストが最大になる位置がピント。バーは現在値÷ベスト（起動直後は最初のフレームがベストになるため右端から始まり、ピントの山を越えるとベストは頂点の値で固定されてバーが短くなる＝行き過ぎ。ノイズで高いベストが固定されたときは `F` を入れ直すか測定領域を移動するとリセットされる）。ピークが飽和すると `SAT` と出る（露出/ゲインを下げる）。単フレームで測るのでスタックONでも使える
 - `k`: ROI指定/クリア（`raw_live_stack.py`）。1回目でドラッグ選択モード、ドラッグで範囲を確定。ROIがあるときに押すとクリア（選択中に押すと取消）。ZoomとはON/OFFも領域も独立
 
 **最大フレーム数オプション:**
@@ -359,7 +360,8 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 補助アプリです（本命は `raw_live_stack.py`）。主な用途は、H.264 ストリームや USB カメラで行う**ピント合わせ用のプレビュー**です。ピント合わせは高いフレームレートがあると便利なため、こちらでは圧縮ストリームを使います。本撮影のスタックでは RAW を使う `raw_live_stack.py` を使います。
 
 #### 主な機能
-- **LiveStack処理**: フレーム位置合わせと加算によるノイズ軽減
+- **LiveStack処理**: `raw_live_stack.py` と同じ `phaseCorrelate` による位置合わせと加算によるノイズ軽減
+- **ROI**: 停止判定・ヒストグラム・位置合わせの対象領域をドラッグで指定できる（被写体を中央に置けないとき用）
 - **設定メニュー**: リアルタイムでの各種設定変更
 - **カメラ切り替え**: 複数カメラ（0と1）のリアルタイム切り替え
 - **統計オーバーレイ**: ヒストグラムとCCDF（累積）を同時表示し、停止閾値と比率を可視化
@@ -379,7 +381,9 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - `r`: スタックリセット
 - `h` / `v`: 左右 / 上下反転トグル
 - `y`: 画面録画AVI開始/停止（info・ヒストグラム・メニュー込み。`--screen-fps` でfps指定、デフォルト15）
-- `F`: フォーカス指標 ON/OFF（`raw_live_stack.py` と同じ指標。画面中央の測定エリア（黄色の枠）を測り、ON中は左クリックで枠を移動。単フレームで測るのでスタック中も使える。遅延の少ないプレビューで先に大まかにピントを合わせる用途。H.264圧縮の影響で `raw_live_stack.py` より粗い）
+- `z`: ズームPiP ON/OFF（`raw_live_stack.py` と同じ。ON中にクリック（`--zoom-click-size` 四方）またはドラッグで切り出す範囲を選び、受信フレームの等倍以上の拡大を隅に重ねる。`--zoom-pip-size` / `--zoom-click-size` / `--zoom-corner` で調整）
+- `F`: フォーカス指標 ON/OFF（`raw_live_stack.py` と同じ指標。Zoomの範囲があればそこを、なければ画面中央の測定エリア（黄色の枠）を測り、Zoom OFFでFocus Aid ON中は左クリックで枠を移動。パネルはZoomのPiPの外側（下隅なら真上）に出る。バーは現在値÷ベスト（起動直後は最初のフレームがベストになるため右端から始まり、ピントの山を越えるとベストが頂点の値で固定されてバーが短くなる＝行き過ぎ。ノイズで高いベストが固定されたときは `F` を入れ直すか測定領域を移動するとリセットされる）。単フレームで測るのでスタック中も使える。遅延の少ないプレビューで先に大まかにピントを合わせる用途。H.264圧縮の影響で `raw_live_stack.py` より粗い）
+- `k`: ROI指定/クリア（ストリームモード。`raw_live_stack.py` と同じ操作：1回目でドラッグ選択モード、ドラッグで確定、ROIがあるときに押すとクリア、選択中に押すと取消）。停止判定（Stop Threshold/Ratio）・ヒストグラム/CCDF・`Now:`・位置合わせがその領域を使う（位置合わせ窓はROIの中心で256pxまで広げる）。変更時はスタックをリセット。`--roi X Y W H`（受信フレームのpx）でも指定できる。設定JSONの `roi` は raw_live_stack.py 用のraw pxなので読み込まない。picamera2直結モードでは `k` がカメラ切り替えのためROIは `o`
 - `k`: カメラ切り替え（0 ↔ 1、picamera2直結モードのみ。旧 `c`）
 - `d`: ダークフレーム取得（picamera2直結モードのみ）
 
@@ -388,7 +392,7 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - `j`: JPEG形式で保存
 - `f`: FITS形式で保存
 
-**操作メニュー（`c`）の項目:** Save PNG / Save JPEG / Save FITS / Screen Rec (AVI) / Focus Aid / Stack Reset。picamera2直結モードでは Dark Capture / Switch Camera も表示。Linux の Qt 版 OpenCV では大文字キーが使えないため、メニューから実行できます。
+**操作メニュー（`c`）の項目:** Save PNG / Save JPEG / Save FITS / Screen Rec (AVI) / Zoom / Focus Aid / ROI (select/clear) / Stack Reset。picamera2直結モードでは Dark Capture / Switch Camera も表示。Linux の Qt 版 OpenCV では大文字キーが使えないため、メニューから実行できます。
 
 **設定メニュー（`m`）の項目:** Stop Threshold / Stop Ratio(%) / Max Frames / Info Display / Histogram / Flip H / Flip V / Stack Mode（picamera2直結モードでは Camera / Size / Gain / Exposure も表示）。
 
@@ -645,7 +649,7 @@ rpicam-raw --width 3840 --height 2160 --framerate 0.3 \
 
 ## LiveStack機能
 
-- **位置合わせ**: `raw_live_stack.py` は `phaseCorrelate` による平行移動検出（基準フレームに対する絶対位置、Bayer色面ごとのサブピクセル移動）。詳細は仕様.md を参照
+- **位置合わせ**: `raw_live_stack.py` / `live_stack.py` とも `phaseCorrelate` による平行移動検出（基準フレームに対する絶対位置、`raw_live_stack.py` は Bayer 色面ごとのサブピクセル移動）。詳細は仕様.md を参照
 - **スタッキング**: 既定は加算（`sum`）。比較明・中央値・シグマクリップなどは設定メニューの `Stack Method` で切り替える
 - **最大フレーム数**: デフォルト100フレーム
 - **更新タイミング**: 1フレーム届くたびに更新する。低fps（0.3fps前後）の運用が前提で、高fpsのリアルタイム処理は目標ではない
@@ -681,6 +685,11 @@ pip install -r requirements.txt
 
 ## 変更履歴
 
+#### 2026/11/10 live_stack.py: 位置合わせをphaseCorrelateに変更しROIに対応
+- 位置合わせが動いていなかった不具合の修正（同サイズ画像で `matchTemplate` を呼んでいたためずれが常に0）。`raw_live_stack.py` と同じ `phaseCorrelate` にし、検出はフレームごとに1回だけにして重さを減らした（枚数が増えて画面が固まって見える問題の改善）。
+- ROI（`[k]`（直結モードは`[o]`）/ `--roi X Y W H` / 操作メニュー）を追加。停止判定・`Now:`・ヒストグラム・位置合わせ窓に使う。
+- `Now:` とヒストグラム/CCDF を、表示画像（√N補正済み）ではなく停止判定と同じ加算値で集計するように修正。
+- スタックリセットでバッファも破棄（以前はリセット後も古いフレームが加算されていた）。
 #### 2026/10/16 ハードウェア構成の追記
 - 「ハードウェア構成（ワイヤレスカメラ）」の節を追加（部品表と写真3枚を `docs/images/` に配置）。`.gitignore` に `docs/images/*.jpg` を例外として追加。
 

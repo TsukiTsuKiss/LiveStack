@@ -74,6 +74,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "common"))
 from hist_overlay import draw_hist_ccdf_overlay
 from display_utils import clamp, decode_key, draw_info_lines, fit_display_frame, get_screen_size
 from focus_utils import draw_focus_panel, new_focus_state, reset_focus_state, update_focus_state
+from zoom_utils import draw_zoom_pip
 from ser_writer import SerWriter
 from ui_menus import ControlMenu, ScreenRecorder, SettingsMenu, route_control_key, toggle_settings_menu
 from raw_utils import (
@@ -2059,24 +2060,7 @@ def run_raw_live_stack(args):
                             pip_crop = display_frame[dy1:dy2, dx1:dx2]
                             pip_crop = apply_white_balance(pip_crop, wb_gains)
                             pip_crop = apply_gamma_correction(pip_crop, gamma_value)
-
-                            # pip_size に拡大（常に 1倍以上）
-                            pip_s = args.zoom_pip_size
-                            scale_f = max(1.0, min(8.0,
-                                pip_s / max(1, max(pip_crop.shape[0], pip_crop.shape[1]))))
-                            new_w = max(1, round(pip_crop.shape[1] * scale_f))
-                            new_h = max(1, round(pip_crop.shape[0] * scale_f))
-                            zoomed = cv2.resize(pip_crop, (new_w, new_h),
-                                                interpolation=cv2.INTER_NEAREST)
-                            zh, zw = zoomed.shape[:2]
-                            margin = 8
-                            corner = args.zoom_corner
-                            ox = margin if corner in ("tl", "bl") else pw - zw - margin
-                            oy = margin if corner in ("tl", "tr") else ph - zh - margin
-                            if ox >= 0 and oy >= 0:
-                                cv2.rectangle(preview_frame, (ox - 1, oy - 1), (ox + zw, oy + zh), (0, 255, 255), 1)
-                                preview_frame[oy:oy + zh, ox:ox + zw] = zoomed
-                                _pip_pos = (ox, oy, zw, zh)
+                            _pip_pos = draw_zoom_pip(preview_frame, pip_crop, args.zoom_pip_size, args.zoom_corner)
                 except Exception as _e:
                     print(f"[zoom error] {_e}")
                     traceback.print_exc()
