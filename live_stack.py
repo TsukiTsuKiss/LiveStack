@@ -13,6 +13,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'common'))
 
 from hist_overlay import draw_hist_ccdf_overlay
 from display_utils import clamp, decode_key, draw_info_lines, fit_display_frame, get_screen_size
+from focus_utils import draw_focus_panel, new_focus_state, reset_focus_state, update_focus_state
 from ui_menus import ControlMenu, ScreenRecorder, SettingsMenu, route_control_key, toggle_settings_menu
 from config_loader import load_config, ssh_start_rpicam, ssh_kill_rpicam
 import cv2
@@ -429,6 +430,7 @@ def build_control_menu(has_camera):
         ("Save JPEG", "j", None),
         ("Save FITS", "f", None),
         ("Screen Rec (AVI)", "y", "scr"),
+        ("Focus Aid", "F", "focus"),
         ("Stack Reset", "r", None),
     ]
     if has_camera:
@@ -452,6 +454,49 @@ class LiveUi:
         self.flip_v = args.flip_v
         self.screen_size = get_screen_size()
         self.camera_meta = None  # カメラ使用時のみ {"exposure_us", "gain", "dark"}
+        # フォーカスアシスト: 最新の単フレーム(スタック・反転前)の領域を測る。中心は表示(反転後)での割合
+        self.focus = new_focus_state()
+        self.focus_center = (0.5, 0.5)
+        self._last_frame = None
+        self._frame_id = 0
+        self._gray = None
+        self._gray_id = -1
+        self._preview_size = (0, 0)
+
+    def attach_mouse(self, window_name):
+        """フォーカスアシストON中の左クリックで測定領域の中心を移動する。"""
+        cv2.namedWindow(window_name)
+        cv2.setMouseCallback(window_name, self._on_mouse)
+
+    def _on_mouse(self, event, x, y, flags, param):
+        pw, ph = self._preview_size
+        if event == cv2.EVENT_LBUTTONDOWN and self.focus["on"] and pw > 0 and ph > 0:
+            self.focus_center = (min(1.0, max(0.0, x / pw)), min(1.0, max(0.0, y / ph)))
+
+    def _draw_focus(self, preview_frame):
+        frame = self._last_frame
+        if frame is None:
+            return
+        h, w = frame.shape[:2]
+        side = max(48, min(h, w) // 5)
+        fx, fy = self.focus_center
+        fx_u = 1.0 - fx if self.flip_h else fx
+        fy_u = 1.0 - fy if self.flip_v else fy
+        x0 = int(min(max(fx_u * w - side / 2, 0), w - side))
+        y0 = int(min(max(fy_u * h - side / 2, 0), h - side))
+        region = (x0, y0, x0 + side, y0 + side)
+        if self._gray_id != self._frame_id:
+            gray_src = frame if frame.ndim == 2 else np.ascontiguousarray(frame[:, :, :3])
+            self._gray = gray_src if frame.ndim == 2 else cv2.cvtColor(gray_src, cv2.COLOR_BGR2GRAY)
+            self._gray_id = self._frame_id
+        update_focus_state(self.focus, self._gray, region, 255, self._frame_id, bin2=False)
+        ph, pw = preview_frame.shape[:2]
+        sx, sy = pw / w, ph / h
+        rx0, rx1 = (w - region[2], w - region[0]) if self.flip_h else (region[0], region[2])
+        ry0, ry1 = (h - region[3], h - region[1]) if self.flip_v else (region[1], region[3])
+        cv2.rectangle(preview_frame, (round(rx0 * sx), round(ry0 * sy)), (round(rx1 * sx), round(ry1 * sy)), (0, 255, 255), 1)
+        if self.focus["hist"]:
+            draw_focus_panel(preview_frame, pw - 240, ph - 94, self.focus)
 
     def sync_settings_menu(self, **camera_values):
         """現在の状態を設定メニューへ反映する（camera/gain/exposure/size_label はキーワードで渡す）"""
@@ -489,6 +534,8 @@ class LiveUi:
     def build_frames(self, frame):
         """フレームをバッファへ追加し、(保存用, 表示用) フレームを返す（スタック・反転適用済み）"""
         self.live_stack.add_to_buffer(frame)
+        self._last_frame = frame
+        self._frame_id += 1
         if self.stacking_enabled:
             result = self.live_stack.process_stack()
             if result is None:
@@ -504,6 +551,7 @@ class LiveUi:
         """縮小→info・ヒストグラム・メニュー合成→画面録画 まで行いプレビューフレームを返す"""
         ls = self.live_stack
         preview_frame = fit_display_frame(display_frame, screen_size=self.screen_size, ratio=0.85, fallback_height=600)
+        self._preview_size = (preview_frame.shape[1], preview_frame.shape[0])
 
         if self.info_display:
             mode_text = "Live Stack Mode" if self.stacking_enabled else "Live View Mode"
@@ -523,10 +571,13 @@ class LiveUi:
                     stop_ratio=ls.overflow_ratio_threshold,
                 )
 
+        if self.focus["on"]:
+            self._draw_focus(preview_frame)
+
         if self.settings_menu.menu_active:
             preview_frame = self.settings_menu.draw_menu(preview_frame)
         if self.control_menu.menu_active:
-            preview_frame = self.control_menu.draw_menu(preview_frame, {"scr": self.screen_rec.active})
+            preview_frame = self.control_menu.draw_menu(preview_frame, {"scr": self.screen_rec.active, "focus": self.focus["on"]})
 
         self.screen_rec.write(preview_frame)
         self.screen_rec.draw_indicator(preview_frame)  # 録画フレームに写らないよう書き込み後に描画
@@ -631,6 +682,10 @@ class LiveUi:
                 print("スタックリセット - 次のフレームから再開")
         elif key == ord("y"):
             self.screen_rec.toggle(preview_frame)
+        elif key == ord("F"):
+            self.focus["on"] = not self.focus["on"]
+            reset_focus_state(self.focus)
+            print(f"[focus] フォーカスアシスト: {'ON' if self.focus['on'] else 'OFF'}（左クリックで測定領域を移動）")
         elif key in (ord("s"), ord("p")):
             self.save_image("png", save_frame)
         elif key == ord("j"):
@@ -657,7 +712,7 @@ class LiveUi:
 def run_stream_mode(source, args, ssh_info=None):
     """URL/カメラ番号ソースでLiveStackを実行（picamera2不要）。ssh_info=(client, pid, ssh_host)があれば終了時にSSH停止する。"""
     print(f"Live Stack - Source: {source}")
-    print("操作: [q]終了 [m]設定メニュー [c]操作メニュー [s]PNG [j]JPEG [f]FITS [y]画面録画 [t]スタックON/OFF [r]リセット [i]情報表示 [h]左右反転 [v]上下反転")
+    print("操作: [q]終了 [m]設定メニュー [c]操作メニュー [s]PNG [j]JPEG [f]FITS [y]画面録画 [F]フォーカスアシスト [t]スタックON/OFF [r]リセット [i]情報表示 [h]左右反転 [v]上下反転")
 
     cap = open_capture(source)
     if not cap.isOpened():
@@ -668,6 +723,7 @@ def run_stream_mode(source, args, ssh_info=None):
 
     live_stack = LiveStack(max_frames=args.max_frames)
     ui = LiveUi(args, live_stack, tag="source", has_camera=False)
+    ui.attach_mouse("Live Stack")
     ui.sync_settings_menu()
 
     try:
@@ -816,6 +872,7 @@ def main():
     print(f"最大スタックフレーム数: {args.max_frames}")
 
     ui = LiveUi(args, live_stack, tag=f"cam{current_camera}", has_camera=True)
+    ui.attach_mouse("Live Stack")
     settings_menu = ui.settings_menu
     if ui.flip_h or ui.flip_v:
         print(f"フリップ: {'H' if ui.flip_h else ''}{' V' if ui.flip_v else ''}".strip())

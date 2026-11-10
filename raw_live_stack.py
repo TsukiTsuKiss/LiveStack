@@ -73,6 +73,7 @@ if sys.platform.startswith("linux"):
 sys.path.append(os.path.join(os.path.dirname(__file__), "common"))
 from hist_overlay import draw_hist_ccdf_overlay
 from display_utils import clamp, decode_key, draw_info_lines, fit_display_frame, get_screen_size
+from focus_utils import draw_focus_panel, new_focus_state, reset_focus_state, update_focus_state
 from ser_writer import SerWriter
 from ui_menus import ControlMenu, ScreenRecorder, SettingsMenu, route_control_key, toggle_settings_menu
 from raw_utils import (
@@ -1396,6 +1397,7 @@ def run_raw_live_stack(args):
             ("SER Rec", "S", "rec"),
             ("Screen Rec (AVI)", "y", "scr"),
             ("Zoom", "z", "zoom"),
+            ("Focus Aid", "F", "focus"),
             ("ROI (select/clear)", "k", "roi"),
             ("Click WB", "w", "click_wb"),
             ("WB Reset", "W", None),
@@ -1464,6 +1466,8 @@ def run_raw_live_stack(args):
         click_wb_mode = False
         zoom_mode = False
         zoom_rect = [None]       # (px1, py1, px2, py2) プレビュー座標
+        # フォーカスアシスト: Zoom領域(なければ中央)の勾配RMSを新フレームごとに計算。反転前のraw座標で扱う
+        focus = new_focus_state()
         _zoom_from_drag = [False]   # True=ドラッグ選択、False=クリック選択
         _zoom_drag = {"start": None, "dragging": False, "current": None}
         # ROI: 停止判定・位置合わせ・ヒストグラムの対象領域（Zoomとは別。座標はraw px・反転前）
@@ -1992,7 +1996,7 @@ def run_raw_live_stack(args):
                 preview_frame = settings_menu.draw_menu(preview_frame)
             if control_menu.menu_active:
                 preview_frame = control_menu.draw_menu(preview_frame, {
-                    "rec": _ser_recording, "scr": screen_rec.active, "zoom": zoom_mode, "click_wb": click_wb_mode,
+                    "rec": _ser_recording, "scr": screen_rec.active, "zoom": zoom_mode, "focus": focus["on"], "click_wb": click_wb_mode,
                     "roi": live_stack.roi is not None or roi_ui["select"],
                 })
 
@@ -2012,6 +2016,8 @@ def run_raw_live_stack(args):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 220), 1, cv2.LINE_AA)
 
             # --- ズーム PiP 描画 ---
+            _zoom_region = None   # 表示座標(反転後)での切り出し領域。フォーカスアシストの測定領域に使う
+            _pip_pos = None
             if zoom_mode:
                 try:
                     if _zoom_drag["dragging"] and _zoom_drag["start"] and _zoom_drag["current"]:
@@ -2048,6 +2054,7 @@ def run_raw_live_stack(args):
                         cv2.rectangle(preview_frame, (rx1, ry1), (rx2, ry2), (0, 255, 255), 1)
 
                         if dx2 > dx1 and dy2 > dy1:
+                            _zoom_region = (dx1, dy1, dx2, dy2)
                             # 元解像度クロップに WB+gamma を適用（小領域なので低コスト）
                             pip_crop = display_frame[dy1:dy2, dx1:dx2]
                             pip_crop = apply_white_balance(pip_crop, wb_gains)
@@ -2069,8 +2076,39 @@ def run_raw_live_stack(args):
                             if ox >= 0 and oy >= 0:
                                 cv2.rectangle(preview_frame, (ox - 1, oy - 1), (ox + zw, oy + zh), (0, 255, 255), 1)
                                 preview_frame[oy:oy + zh, ox:ox + zw] = zoomed
+                                _pip_pos = (ox, oy, zw, zh)
                 except Exception as _e:
                     print(f"[zoom error] {_e}")
+                    traceback.print_exc()
+
+            # --- フォーカスアシスト ---
+            if focus["on"] and last_view16 is not None:
+                try:
+                    ph_f, pw_f = preview_frame.shape[:2]
+                    dh_f, dw_f = display_frame.shape[:2]
+                    if _zoom_region is not None:
+                        rg = _zoom_region
+                    else:
+                        half_f = args.zoom_click_size // 2
+                        rg = (dw_f // 2 - half_f, dh_f // 2 - half_f, dw_f // 2 + half_f, dh_f // 2 + half_f)
+                        cv2.rectangle(preview_frame,
+                                      (round(rg[0] * pw_f / dw_f), round(rg[1] * ph_f / dh_f)),
+                                      (round(rg[2] * pw_f / dw_f), round(rg[3] * ph_f / dh_f)), (0, 255, 255), 1)
+                    # 表示座標(反転後)→raw座標(反転前)
+                    rx0_f, rx1_f = (dw_f - rg[2], dw_f - rg[0]) if flip_h else (rg[0], rg[2])
+                    ry0_f, ry1_f = (dh_f - rg[3], dh_f - rg[1]) if flip_v else (rg[1], rg[3])
+                    raw_rg = (rx0_f, ry0_f, rx1_f, ry1_f)
+                    update_focus_state(focus, last_view16, raw_rg, (1 << effective_bits) - 1, frame_count)
+                    if focus["hist"]:
+                        if _pip_pos is not None:
+                            # PiPを覆わないよう、下隔なら真上・上隔なら真下に同じ幅で置く
+                            fx, fy, fw, fh = _pip_pos
+                            py_f = fy - 84 - 6 if args.zoom_corner in ("bl", "br") else fy + fh + 6
+                            draw_focus_panel(preview_frame, fx, py_f, focus, width=max(fw, 230))
+                        else:
+                            draw_focus_panel(preview_frame, pw_f - 240, ph_f - 94, focus)
+                except Exception as _e:
+                    print(f"[focus error] {_e}")
                     traceback.print_exc()
 
             # --- ROI 枠 ---
@@ -2198,6 +2236,10 @@ def run_raw_live_stack(args):
                     _zoom_drag["start"] = None
                     _zoom_drag["dragging"] = False
                 print(f"[zoom] {'ON' if zoom_mode else 'OFF'}")
+            elif key == ord("F"):
+                focus["on"] = not focus["on"]
+                reset_focus_state(focus)
+                print(f"[focus] フォーカスアシスト: {'ON' if focus['on'] else 'OFF'}（Zoom領域、なければ中央を測定）")
             elif key == ord("k"):
                 if roi_ui["select"]:
                     roi_ui.update(select=False, dragging=False, start=None, current=None)

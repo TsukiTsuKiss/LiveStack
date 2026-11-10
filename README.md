@@ -136,6 +136,7 @@ camera-live/
 │   ├── camera_config.py  # 共通カメラ設定
 │   ├── config_loader.py  # config階層(sensor/host/meta)の読み込みとSSHでのrpicam起動・停止
 │   ├── display_utils.py  # 表示ユーティリティ
+│   ├── focus_utils.py    # フォーカスアシストの指標計算とパネル描画（両アプリ共通）
 │   ├── hist_overlay.py   # ヒストグラム+CCDFオーバーレイ
 │   ├── ui_menus.py       # 設定メニュー・操作メニュー・画面録画（両アプリ共通）
 │   └── raw_utils.py      # RAW受信・デコード・WB/ガンマ共通処理
@@ -281,6 +282,7 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - `S` / `x`: SER録画開始/停止トグル。`recordings/` 下の日時フォルダに `*_raw.ser`（カメラRAW）と `*_stack.ser`（スタック済み。スタックON中のみ）、使ったダーク・設定JSONを保存（`--no-rec-raw` / `--no-rec-stack` / `--no-rec-folder` で無効化可）
 - Linux の Qt 版 OpenCV では Shift が反映されないため、大文字キー（`S`/`W` 等）は使えない。`S` は `x`、`W` は `u` で代用する。`A`/`E`/`H` は設定メニューの `Align`/`Dark Sub`/`Histogram` から切替できる。他の大文字キー機能も `c` の操作メニューから実行できる
 - `z`: フォーカスアシストズーム ON/OFF（ON中にクリック/ドラッグで拡大エリアを選択）
+- `F`: フォーカス指標 ON/OFF（操作メニュー `Focus Aid`）。Zoomの切り出し領域（未選択なら画面中央）で、ピントの鋭さ（勾配RMS）を新フレームごとに計算し、現在値・ベスト・履歴グラフを表示する。ベストが最大になる位置がピント。ピークが飽和すると `SAT` と出る（露出/ゲインを下げる）。単フレームで測るのでスタックONでも使える
 - `k`: ROI指定/クリア（`raw_live_stack.py`）。1回目でドラッグ選択モード、ドラッグで範囲を確定。ROIがあるときに押すとクリア（選択中に押すと取消）。ZoomとはON/OFFも領域も独立
 
 **最大フレーム数オプション:**
@@ -377,6 +379,7 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - `r`: スタックリセット
 - `h` / `v`: 左右 / 上下反転トグル
 - `y`: 画面録画AVI開始/停止（info・ヒストグラム・メニュー込み。`--screen-fps` でfps指定、デフォルト15）
+- `F`: フォーカス指標 ON/OFF（`raw_live_stack.py` と同じ指標。画面中央の測定エリア（黄色の枠）を測り、ON中は左クリックで枠を移動。単フレームで測るのでスタック中も使える。遅延の少ないプレビューで先に大まかにピントを合わせる用途。H.264圧縮の影響で `raw_live_stack.py` より粗い）
 - `k`: カメラ切り替え（0 ↔ 1、picamera2直結モードのみ。旧 `c`）
 - `d`: ダークフレーム取得（picamera2直結モードのみ）
 
@@ -385,7 +388,7 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
 - `j`: JPEG形式で保存
 - `f`: FITS形式で保存
 
-**操作メニュー（`c`）の項目:** Save PNG / Save JPEG / Save FITS / Screen Rec (AVI) / Stack Reset。picamera2直結モードでは Dark Capture / Switch Camera も表示。Linux の Qt 版 OpenCV では大文字キーが使えないため、メニューから実行できます。
+**操作メニュー（`c`）の項目:** Save PNG / Save JPEG / Save FITS / Screen Rec (AVI) / Focus Aid / Stack Reset。picamera2直結モードでは Dark Capture / Switch Camera も表示。Linux の Qt 版 OpenCV では大文字キーが使えないため、メニューから実行できます。
 
 **設定メニュー（`m`）の項目:** Stop Threshold / Stop Ratio(%) / Max Frames / Info Display / Histogram / Flip H / Flip V / Stack Mode（picamera2直結モードでは Camera / Size / Gain / Exposure も表示）。
 
