@@ -339,11 +339,19 @@ python raw_live_stack.py --source tcp://192.168.1.63:8888 \
    "rpicam_cmd": "rpicam-raw --width 3840 --height 2160 --framerate 0.3 -t 0 --shutter 5000000 --gain 0 --nopreview"
    ```
 6. `python raw_live_stack.py --config` で起動する（`--source` は `ssh_host` から自動設定される）。
+7. DHCPなどでPiのIPが変わる場合は、JSONを書き換えずにコマンドラインで上書きする（コマンドラインがJSONより優先される）。`--source` は `--ssh-host` から自動設定されるが、JSON側に `source` が残っている場合はそちらが使われるため、併せて指定する:
+   ```bash
+   python raw_live_stack.py --config --ssh-host 192.168.1.14 --source tcp://192.168.1.14:8888
+   ```
+
+**Pi本体（自分自身）で動かす場合:** `ssh_host` が `127.0.0.1` だとPi自身にSSH接続するため、`paramiko` と、自分の `authorized_keys` に登録した鍵が必要になる。SSHを使いたくない場合は `--no-ssh`（JSONなら `"no_ssh": true`）を付け、別ターミナルで `rpicam-raw` を手動起動してから `python raw_live_stack.py --config --no-ssh` を実行する。
 
 **つまずきやすい点:**
 - `ssh_key` には**秘密鍵**（`.pub` の付かないファイル）を指定する。`~/.ssh/known_hosts` は接続先の記録で鍵ではないため、`not a valid OPENSSH private key file` になる。
 - `ssh_host` が `null` のままだと、`rpicam_cmd` があってもSSHは使われず、手動起動済みのrpicam-rawへ接続しに行く。起動していなければ `Connection refused` になる。`[SSH]` の行が出ているかで見分けられる。
 - 手動でrpicam-rawを起動した場合は `--no-ssh` を付ける。
+- JSONの構文エラー（閉じ引用符の抜けなど）があると `[config] 読み込み失敗` と出て、そのファイルの設定が全部無視される。画が乱れる、WBや反転が効かないときは、まず起動ログと `python -m json.tool <ファイル>` で確認する。
+- JSONで同じキーが重複すると後ろの値が採用される（例: `stride` が2つあると下の値）。
 - 起動に失敗したときはPi側の `/tmp/rpicam_raw.log` にrpicam-rawの出力が残る。
 - 鍵の種類は自由（`ed25519` なら `ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519` で作り、`ssh_key` を `~/.ssh/id_ed25519` にする）。Pi側のOpenSSHがRSAを受け付けない設定の場合は `ed25519` を使う。ファイル名の違いだけで、置き場所（Windowsも `~/.ssh/`）は同じ。
 - 鍵ファイルの中身（秘密鍵）は公開しない。リポジトリには入れない（`~/.ssh` はリポジトリの外）。`ssh_key` のパス文字列だけなら公開して問題ない。
