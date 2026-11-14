@@ -443,7 +443,9 @@ class ControlMenu:
             color = (0, 255, 0) if i == self.selected_item else (255, 255, 255)
             text = label
             if state_name is not None:
-                text += f": {'ON' if states.get(state_name) else 'OFF'}"
+                value = states.get(state_name)
+                # 文字列の状態はモード名としてそのまま表示する
+                text += f": {value if isinstance(value, str) else ('ON' if value else 'OFF')}"
             cv2.putText(frame, text, (x0 + 30, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
             if i == self.selected_item:
                 cv2.putText(frame, ">", (x0 + 5, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)

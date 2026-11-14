@@ -13,7 +13,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'common'))
 
 from hist_overlay import draw_hist_ccdf_overlay
 from display_utils import clamp, decode_key, draw_info_lines, fit_display_frame, get_screen_size
-from focus_utils import draw_focus_panel, new_focus_state, reset_focus_state, update_focus_state
+from focus_utils import (cycle_focus_mode, draw_focus_panel, draw_focus_stars, draw_focus_stars_pip,
+                         focus_mode_label, new_focus_state, update_focus_state)
 from zoom_utils import draw_zoom_pip
 from ui_menus import ControlMenu, ScreenRecorder, SettingsMenu, route_control_key, toggle_settings_menu
 from config_loader import load_config, ssh_start_rpicam, ssh_kill_rpicam
@@ -736,6 +737,8 @@ class LiveUi:
             ux0, ux1 = (w - zx1, w - zx0) if self.flip_h else (zx0, zx1)
             uy0, uy1 = (h - zy1, h - zy0) if self.flip_v else (zy0, zy1)
             region = (ux0, uy0, ux1, uy1)
+        elif self.focus["mode"] == "star":
+            region = None  # 画面全体から自動検出
         else:
             side = max(48, min(h, w) // 5)
             fx, fy = self.focus_center
@@ -750,12 +753,20 @@ class LiveUi:
             self._gray_id = self._frame_id
         update_focus_state(self.focus, self._gray, region, 255, self._frame_id, bin2=False)
         ph, pw = preview_frame.shape[:2]
-        if self._zoom_region is None:
+        star_mode = self.focus["mode"] == "star"
+        if star_mode:
+            draw_focus_stars(
+                preview_frame, self.focus,
+                lambda x, y: (round((w - x if self.flip_h else x) * pw / w), round((h - y if self.flip_v else y) * ph / h)),
+                pw / w)
+            if pip_pos is not None and self._zoom_region is not None:
+                draw_focus_stars_pip(preview_frame, self.focus, pip_pos, self._zoom_region, (w, h), self.flip_h, self.flip_v)
+        elif self._zoom_region is None:
             sx, sy = pw / w, ph / h
             rx0, rx1 = (w - region[2], w - region[0]) if self.flip_h else (region[0], region[2])
             ry0, ry1 = (h - region[3], h - region[1]) if self.flip_v else (region[1], region[3])
             cv2.rectangle(preview_frame, (round(rx0 * sx), round(ry0 * sy)), (round(rx1 * sx), round(ry1 * sy)), (0, 255, 255), 1)
-        if not self.focus["hist"]:
+        if not self.focus["hist"] and not star_mode:
             return
         if pip_pos is not None:
             # PiPを覆わないよう、下隔なら真上・上隔なら真下に同じ幅で置く
@@ -893,7 +904,7 @@ class LiveUi:
         if self.settings_menu.menu_active:
             preview_frame = self.settings_menu.draw_menu(preview_frame)
         if self.control_menu.menu_active:
-            preview_frame = self.control_menu.draw_menu(preview_frame, {"scr": self.screen_rec.active, "zoom": self.zoom_on, "focus": self.focus["on"], "roi": ls.roi is not None or self.roi_ui["select"]})
+            preview_frame = self.control_menu.draw_menu(preview_frame, {"scr": self.screen_rec.active, "zoom": self.zoom_on, "focus": focus_mode_label(self.focus), "roi": ls.roi is not None or self.roi_ui["select"]})
 
         self.screen_rec.write(preview_frame)
         self.screen_rec.draw_indicator(preview_frame)  # 録画フレームに写らないよう書き込み後に描画
@@ -1005,9 +1016,7 @@ class LiveUi:
                 self._zoom_drag = {"start": None, "cur": None}
             print(f"[zoom] {'ON' if self.zoom_on else 'OFF'}（クリック/ドラッグで拡大する範囲を選択）")
         elif key == ord("F"):
-            self.focus["on"] = not self.focus["on"]
-            reset_focus_state(self.focus)
-            print(f"[focus] フォーカスアシスト: {'ON' if self.focus['on'] else 'OFF'}（左クリックで測定領域を移動）")
+            print(f"[focus] フォーカスアシスト: {cycle_focus_mode(self.focus)}（星(円)→星(四角)→勾配→OFFと切替。星=Zoom領域内の1個、なければ画面から最大5個を自動検出 / 勾配=左クリックで測定領域を移動）")
         elif key == ord(self.roi_key):
             self.toggle_roi()
         elif key in (ord("s"), ord("p")):

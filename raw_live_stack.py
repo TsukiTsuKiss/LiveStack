@@ -73,7 +73,8 @@ if sys.platform.startswith("linux"):
 sys.path.append(os.path.join(os.path.dirname(__file__), "common"))
 from hist_overlay import draw_hist_ccdf_overlay
 from display_utils import clamp, decode_key, draw_info_lines, fit_display_frame, get_screen_size
-from focus_utils import draw_focus_panel, new_focus_state, reset_focus_state, update_focus_state
+from focus_utils import (cycle_focus_mode, draw_focus_panel, draw_focus_stars, draw_focus_stars_pip,
+                         focus_mode_label, new_focus_state, update_focus_state)
 from zoom_utils import draw_zoom_pip
 from ser_writer import SerWriter
 from ui_menus import ControlMenu, ScreenRecorder, SettingsMenu, route_control_key, toggle_settings_menu
@@ -1997,7 +1998,7 @@ def run_raw_live_stack(args):
                 preview_frame = settings_menu.draw_menu(preview_frame)
             if control_menu.menu_active:
                 preview_frame = control_menu.draw_menu(preview_frame, {
-                    "rec": _ser_recording, "scr": screen_rec.active, "zoom": zoom_mode, "focus": focus["on"], "click_wb": click_wb_mode,
+                    "rec": _ser_recording, "scr": screen_rec.active, "zoom": zoom_mode, "focus": focus_mode_label(focus), "click_wb": click_wb_mode,
                     "roi": live_stack.roi is not None or roi_ui["select"],
                 })
 
@@ -2070,8 +2071,11 @@ def run_raw_live_stack(args):
                 try:
                     ph_f, pw_f = preview_frame.shape[:2]
                     dh_f, dw_f = display_frame.shape[:2]
+                    star_mode = focus["mode"] == "star"
                     if _zoom_region is not None:
                         rg = _zoom_region
+                    elif star_mode:
+                        rg = None  # 画面全体から自動検出
                     else:
                         half_f = args.zoom_click_size // 2
                         rg = (dw_f // 2 - half_f, dh_f // 2 - half_f, dw_f // 2 + half_f, dh_f // 2 + half_f)
@@ -2079,11 +2083,22 @@ def run_raw_live_stack(args):
                                       (round(rg[0] * pw_f / dw_f), round(rg[1] * ph_f / dh_f)),
                                       (round(rg[2] * pw_f / dw_f), round(rg[3] * ph_f / dh_f)), (0, 255, 255), 1)
                     # 表示座標(反転後)→raw座標(反転前)
-                    rx0_f, rx1_f = (dw_f - rg[2], dw_f - rg[0]) if flip_h else (rg[0], rg[2])
-                    ry0_f, ry1_f = (dh_f - rg[3], dh_f - rg[1]) if flip_v else (rg[1], rg[3])
-                    raw_rg = (rx0_f, ry0_f, rx1_f, ry1_f)
+                    if rg is None:
+                        raw_rg = None
+                    else:
+                        rx0_f, rx1_f = (dw_f - rg[2], dw_f - rg[0]) if flip_h else (rg[0], rg[2])
+                        ry0_f, ry1_f = (dh_f - rg[3], dh_f - rg[1]) if flip_v else (rg[1], rg[3])
+                        raw_rg = (rx0_f, ry0_f, rx1_f, ry1_f)
                     update_focus_state(focus, last_view16, raw_rg, (1 << effective_bits) - 1, frame_count)
-                    if focus["hist"]:
+                    if star_mode:
+                        draw_focus_stars(
+                            preview_frame, focus,
+                            lambda x, y: (round((dw_f - x if flip_h else x) * pw_f / dw_f),
+                                          round((dh_f - y if flip_v else y) * ph_f / dh_f)),
+                            pw_f / dw_f)
+                        if _pip_pos is not None and _zoom_region is not None:
+                            draw_focus_stars_pip(preview_frame, focus, _pip_pos, _zoom_region, (dw_f, dh_f), flip_h, flip_v)
+                    if focus["hist"] or star_mode:
                         if _pip_pos is not None:
                             # PiPを覆わないよう、下隔なら真上・上隔なら真下に同じ幅で置く
                             fx, fy, fw, fh = _pip_pos
@@ -2221,9 +2236,7 @@ def run_raw_live_stack(args):
                     _zoom_drag["dragging"] = False
                 print(f"[zoom] {'ON' if zoom_mode else 'OFF'}")
             elif key == ord("F"):
-                focus["on"] = not focus["on"]
-                reset_focus_state(focus)
-                print(f"[focus] フォーカスアシスト: {'ON' if focus['on'] else 'OFF'}（Zoom領域、なければ中央を測定）")
+                print(f"[focus] フォーカスアシスト: {cycle_focus_mode(focus)}（星(円)→星(四角)→勾配→OFFと切替。星=Zoom領域内の1個、なければ画面から最大5個を自動検出 / 勾配=Zoom領域、なければ中央）")
             elif key == ord("k"):
                 if roi_ui["select"]:
                     roi_ui.update(select=False, dragging=False, start=None, current=None)
