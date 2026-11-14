@@ -14,7 +14,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'common'))
 from hist_overlay import draw_hist_ccdf_overlay
 from display_utils import clamp, decode_key, draw_info_lines, fit_display_frame, get_screen_size
 from focus_utils import (cycle_focus_mode, draw_focus_panel, draw_focus_stars, draw_focus_stars_pip,
-                         focus_mode_label, new_focus_state, update_focus_state)
+                         focus_mode_label, new_focus_state, reset_focus_state, update_focus_state)
 from zoom_utils import draw_zoom_pip
 from ui_menus import ControlMenu, ScreenRecorder, SettingsMenu, route_control_key, toggle_settings_menu
 from config_loader import load_config, ssh_start_rpicam, ssh_kill_rpicam
@@ -572,6 +572,7 @@ def build_control_menu(has_camera, roi_key):
         ("Screen Rec (AVI)", "y", "scr"),
         ("Zoom", "z", "zoom"),
         ("Focus Aid", "F", "focus"),
+        ("Focus Reselect", "T", None),
         ("ROI (select/clear)", roi_key, "roi"),
         ("Stack Reset", "r", None),
     ]
@@ -610,6 +611,7 @@ class LiveUi:
         # ズームPiP: 切り出し範囲は表示(反転後)での割合(fx0, fy0, fx1, fy1)
         self.zoom_on = False
         self.zoom_rect = None
+        self.zoom_anchor = None  # クリック位置(ドラッグなら範囲の中心)の表示割合。画面端で範囲がずれても星を取り違えない
         self._zoom_drag = {"start": None, "cur": None}
         self._zoom_region = None  # 直近に描画した切り出し範囲(表示px)。フォーカス測定に使う
         self.zoom_pip_size = getattr(args, "zoom_pip_size", 640)
@@ -705,8 +707,10 @@ class LiveUi:
                 self._zoom_drag = {"start": None, "cur": None}
                 if abs(x - x0) < 8 and abs(y - y0) < 8:
                     self.zoom_rect = self._click_rect(fx, fy)
+                    self.zoom_anchor = (fx, fy)
                 else:
                     self.zoom_rect = (min(x0, x) / pw, min(y0, y) / ph, max(x0, x) / pw, max(y0, y) / ph)
+                    self.zoom_anchor = ((x0 + x) / 2 / pw, (y0 + y) / 2 / ph)
         elif event == cv2.EVENT_LBUTTONDOWN and self.focus["on"]:
             self.focus_center = (fx, fy)
 
@@ -732,11 +736,16 @@ class LiveUi:
         if frame is None:
             return
         h, w = frame.shape[:2]
+        anchor = None
         if self._zoom_region is not None:
             zx0, zy0, zx1, zy1 = self._zoom_region
             ux0, ux1 = (w - zx1, w - zx0) if self.flip_h else (zx0, zx1)
             uy0, uy1 = (h - zy1, h - zy0) if self.flip_v else (zy0, zy1)
             region = (ux0, uy0, ux1, uy1)
+            anchor = None
+            if self.zoom_anchor is not None:
+                ax, ay = self.zoom_anchor
+                anchor = (round((1.0 - ax if self.flip_h else ax) * w), round((1.0 - ay if self.flip_v else ay) * h))
         elif self.focus["mode"] == "star":
             region = None  # 画面全体から自動検出
         else:
@@ -751,7 +760,7 @@ class LiveUi:
             gray_src = frame if frame.ndim == 2 else np.ascontiguousarray(frame[:, :, :3])
             self._gray = gray_src if frame.ndim == 2 else cv2.cvtColor(gray_src, cv2.COLOR_BGR2GRAY)
             self._gray_id = self._frame_id
-        update_focus_state(self.focus, self._gray, region, 255, self._frame_id, bin2=False)
+        update_focus_state(self.focus, self._gray, region, 255, self._frame_id, bin2=False, anchor=anchor)
         ph, pw = preview_frame.shape[:2]
         star_mode = self.focus["mode"] == "star"
         if star_mode:
@@ -1013,10 +1022,15 @@ class LiveUi:
             self.zoom_on = not self.zoom_on
             if not self.zoom_on:
                 self.zoom_rect = None
+                self.zoom_anchor = None
                 self._zoom_drag = {"start": None, "cur": None}
             print(f"[zoom] {'ON' if self.zoom_on else 'OFF'}（クリック/ドラッグで拡大する範囲を選択）")
         elif key == ord("F"):
             print(f"[focus] フォーカスアシスト: {cycle_focus_mode(self.focus)}（星(円)→星(四角)→勾配→OFFと切替。星=Zoom領域内の1個、なければ画面から最大5個を自動検出 / 勾配=左クリックで測定領域を移動）")
+        elif key == ord("T"):
+            if self.focus["on"]:
+                reset_focus_state(self.focus)
+                print("[focus] 星を選び直し（ベスト・履歴をリセット）")
         elif key == ord(self.roi_key):
             self.toggle_roi()
         elif key in (ord("s"), ord("p")):

@@ -74,7 +74,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "common"))
 from hist_overlay import draw_hist_ccdf_overlay
 from display_utils import clamp, decode_key, draw_info_lines, fit_display_frame, get_screen_size
 from focus_utils import (cycle_focus_mode, draw_focus_panel, draw_focus_stars, draw_focus_stars_pip,
-                         focus_mode_label, new_focus_state, update_focus_state)
+                         focus_mode_label, new_focus_state, reset_focus_state, update_focus_state)
 from zoom_utils import draw_zoom_pip
 from ser_writer import SerWriter
 from ui_menus import ControlMenu, ScreenRecorder, SettingsMenu, route_control_key, toggle_settings_menu
@@ -1400,6 +1400,7 @@ def run_raw_live_stack(args):
             ("Screen Rec (AVI)", "y", "scr"),
             ("Zoom", "z", "zoom"),
             ("Focus Aid", "F", "focus"),
+            ("Focus Reselect", "T", None),
             ("ROI (select/clear)", "k", "roi"),
             ("Click WB", "w", "click_wb"),
             ("WB Reset", "W", None),
@@ -2019,6 +2020,7 @@ def run_raw_live_stack(args):
 
             # --- ズーム PiP 描画 ---
             _zoom_region = None   # 表示座標(反転後)での切り出し領域。フォーカスアシストの測定領域に使う
+            _zoom_anchor = None   # 表示座標でのクリック位置(ドラッグなら範囲の中心)。画面端で領域がずれても星を取り違えない
             _pip_pos = None
             if zoom_mode:
                 try:
@@ -2036,6 +2038,7 @@ def run_raw_live_stack(args):
                             dy1 = max(0, round(zoom_rect[0][1] * dh / ph))
                             dx2 = min(dw, round(zoom_rect[0][2] * dw / pw))
                             dy2 = min(dh, round(zoom_rect[0][3] * dh / ph))
+                            _zoom_anchor = ((dx1 + dx2) // 2, (dy1 + dy2) // 2)
                         else:
                             # クリック: zoom_click_size 原解像度画素を中心から切り出す
                             cx_p = (zoom_rect[0][0] + zoom_rect[0][2]) // 2
@@ -2047,6 +2050,7 @@ def run_raw_live_stack(args):
                             dy1 = max(0, min(cy_d - half, dh - args.zoom_click_size))
                             dx2 = min(dw, dx1 + args.zoom_click_size)
                             dy2 = min(dh, dy1 + args.zoom_click_size)
+                            _zoom_anchor = (cx_d, cy_d)
 
                         # プレビュー上に選択枠を表示（元座標を逆変換）
                         rx1 = max(0, round(dx1 * pw / dw))
@@ -2084,12 +2088,17 @@ def run_raw_live_stack(args):
                                       (round(rg[2] * pw_f / dw_f), round(rg[3] * ph_f / dh_f)), (0, 255, 255), 1)
                     # 表示座標(反転後)→raw座標(反転前)
                     if rg is None:
-                        raw_rg = None
+                        raw_rg = raw_anchor = None
                     else:
                         rx0_f, rx1_f = (dw_f - rg[2], dw_f - rg[0]) if flip_h else (rg[0], rg[2])
                         ry0_f, ry1_f = (dh_f - rg[3], dh_f - rg[1]) if flip_v else (rg[1], rg[3])
                         raw_rg = (rx0_f, ry0_f, rx1_f, ry1_f)
-                    update_focus_state(focus, last_view16, raw_rg, (1 << effective_bits) - 1, frame_count)
+                        raw_anchor = None
+                        if _zoom_anchor is not None:
+                            raw_anchor = (dw_f - _zoom_anchor[0] if flip_h else _zoom_anchor[0],
+                                          dh_f - _zoom_anchor[1] if flip_v else _zoom_anchor[1])
+                    update_focus_state(focus, last_view16, raw_rg, (1 << effective_bits) - 1, frame_count,
+                                       anchor=raw_anchor)
                     if star_mode:
                         draw_focus_stars(
                             preview_frame, focus,
@@ -2237,6 +2246,10 @@ def run_raw_live_stack(args):
                 print(f"[zoom] {'ON' if zoom_mode else 'OFF'}")
             elif key == ord("F"):
                 print(f"[focus] フォーカスアシスト: {cycle_focus_mode(focus)}（星(円)→星(四角)→勾配→OFFと切替。星=Zoom領域内の1個、なければ画面から最大5個を自動検出 / 勾配=Zoom領域、なければ中央）")
+            elif key == ord("T"):
+                if focus["on"]:
+                    reset_focus_state(focus)
+                    print("[focus] 星を選び直し（ベスト・履歴をリセット）")
             elif key == ord("k"):
                 if roi_ui["select"]:
                     roi_ui.update(select=False, dragging=False, start=None, current=None)

@@ -14,16 +14,19 @@ STAR_DETECT_SIGMA = 8.0  # 星候補の検出しきい値(平滑化後の背景�
 STAR_MIN_SNR = 5.0       # 測定窓内のピークの最小SNR(未満は見失い扱い)
 STAR_MIN_HFR = 0.5       # これ未満はホットピクセル扱い(ビニング後px)
 STAR_REDETECT = 15       # 星が足りないとき再検出する間隔(フレーム)
+STAR_PEAK_MAX = 0.5      # これ以下のピーク(上限比)の星を優先する。ピントが合うとピークが上がるため
+STAR_MIN_USABLE = 3      # 非飽和の星がこれを下回ったときだけ飽和した星を入れ替える
+STAR_CENTROID_SIGMA = 3.5  # 重心計算のガウス窓σ(ビニング後px)。近くの別の星に引かれにくくする
 
 
 def new_focus_state():
     return {"on": False, "mode": "star", "shape": "circle", "hist": deque(maxlen=FOCUS_HISTORY), "best": 0.0,
             "key": None, "fc": -1, "score": 0.0, "peak": 0.0, "sat": False,
-            "stars": [], "star_hfr": [], "k": 1, "age": STAR_REDETECT}
+            "stars": [], "star_hfr": [], "k": 1, "age": STAR_REDETECT, "last": None}
 
 
 def reset_focus_state(state):
-    state.update(best=0.0, key=None, fc=-1, score=0.0, sat=False, stars=[], star_hfr=[], age=STAR_REDETECT)
+    state.update(best=0.0, key=None, fc=-1, score=0.0, sat=False, stars=[], star_hfr=[], age=STAR_REDETECT, last=None)
     state["hist"].clear()
 
 
@@ -92,7 +95,7 @@ def _crop_binned(img, bx0, by0, bx1, by1, k):
 
 
 def _measure_star(img, cx, cy, k, max_value):
-    """(cx, cy)周りの星の(HFR, 重心x, 重心y, 飽和か)をビニング後pxで返す。見失い・端に近いときはNone。"""
+    """(cx, cy)周りの星の(HFR, 重心x, 重心y, 飽和か, ピーク)をビニング後pxで返す。見失い・端に近いときはNone。"""
     r = STAR_RADIUS
     ix, iy = int(round(cx)), int(round(cy))
     res = _crop_binned(img, ix - r, iy - r, ix + r + 1, iy + r + 1, k)
@@ -109,22 +112,32 @@ def _measure_star(img, cx, cy, k, max_value):
     if flux <= 0 or float(sub.max()) < STAR_MIN_SNR * sigma:
         return None
     yy, xx = np.indices((n, n), dtype=np.float32)
-    mx, my = float((sub * xx).sum()) / flux, float((sub * yy).sum()) / flux
+    mx = my = float(r)
+    for _ in range(3):
+        wgt = sub * np.exp(-((xx - mx) ** 2 + (yy - my) ** 2) / (2 * STAR_CENTROID_SIGMA ** 2))
+        total = float(wgt.sum())
+        if total <= 0:
+            break
+        mx, my = float((wgt * xx).sum()) / total, float((wgt * yy).sum()) / total
     dist = np.hypot(xx - mx, yy - my).ravel()
     order = np.argsort(dist)
     cum = np.cumsum(sub.ravel()[order])
     hfr = float(np.interp(0.5 * flux, cum, dist[order]))
-    return hfr, x0 + mx, y0 + my, peak >= FOCUS_SAT_RATIO * max_value
+    # 飽和・ピークは窓全体ではなく星の近傍だけで見る(隣の明るい星を拾わないため)
+    gx, gy = int(round(x0 + mx)), int(round(y0 + my))
+    local = img[max(0, (gy - 2) * k):(gy + 3) * k, max(0, (gx - 2) * k):(gx + 3) * k]
+    peak = float(local.max()) if local.size else peak
+    return hfr, x0 + mx, y0 + my, peak >= FOCUS_SAT_RATIO * max_value, peak
 
 
-def _detect_stars(img, bounds, k, max_value, exclude, limit):
-    """bounds(ビニング後座標)内の孤立した非飽和の星を明るい順に最大limit個、(x, y, HFR)で返す。"""
+def _star_candidates(img, bounds, k):
+    """bounds(ビニング後座標)内の星候補(局所最大)を明るい順に最大200個、(xs, ys, 強さ)で返す。"""
     res = _crop_binned(img, *bounds, k)
-    if res is None or limit <= 0:
-        return []
+    if res is None:
+        return None
     f, _, ox, oy = res
     if min(f.shape) < 8:
-        return []
+        return None
     h, w = f.shape
     small = cv2.resize(f, None, fx=0.25, fy=0.25, interpolation=cv2.INTER_AREA)
     bg = cv2.resize(cv2.GaussianBlur(small, (0, 0), 4), (w, h), interpolation=cv2.INTER_LINEAR)
@@ -134,9 +147,34 @@ def _detect_stars(img, bounds, k, max_value, exclude, limit):
     peaks = (d >= cv2.dilate(d, np.ones((7, 7), np.uint8))) & (d > med + STAR_DETECT_SIGMA * sigma)
     ys, xs = np.nonzero(peaks)
     order = np.argsort(-d[ys, xs])[:200]
-    vals = d[ys[order], xs[order]]
-    xs, ys = xs[order] + ox, ys[order] + oy
+    return xs[order] + ox, ys[order] + oy, d[ys[order], xs[order]]
+
+
+def _detect_near(img, bounds, k, max_value, anchor):
+    """Zoomで選ばれた星として、bounds内でanchor(ビニング後座標)に最も近い星を(x, y, HFR)で返す。
+    明るさ・孤立・飽和は問わず(飽和ならHFRはNone)、見つからなければ空リスト。"""
+    cand = _star_candidates(img, bounds, k)
+    if cand is None:
+        return []
+    xs, ys, _ = cand
+    for i in np.argsort(np.hypot(xs - anchor[0], ys - anchor[1]))[:10]:
+        m = _measure_star(img, float(xs[i]), float(ys[i]), k, max_value)
+        if m is not None and m[0] >= STAR_MIN_HFR:
+            return [(m[1], m[2], None if m[3] else m[0])]
+    return []
+
+
+def _detect_stars(img, bounds, k, max_value, exclude, limit):
+    """bounds(ビニング後座標)内の孤立した星を最大limit個、(x, y, HFR)で返す。
+    ピークが上限のSTAR_PEAK_MAX以下の星を明るい順に優先し、足りなければより明るい非飽和の星で埋める。
+    非飽和の星が無く監視中の星も無いときだけ、飽和した星を(x, y, None)で1個返す。"""
+    cand = _star_candidates(img, bounds, k) if limit > 0 else None
+    if cand is None:
+        return []
+    xs, ys, vals = cand
     found = []
+    bright = []
+    saturated = []
     taken = [tuple(p) for p in exclude]
     for i in range(len(xs)):
         x, y = float(xs[i]), float(ys[i])
@@ -147,17 +185,25 @@ def _detect_stars(img, bounds, k, max_value, exclude, limit):
         if any(np.hypot(px - x, py - y) < 2 * STAR_RADIUS for px, py in taken):
             continue
         m = _measure_star(img, x, y, k, max_value)
-        if m is None or m[3] or m[0] < STAR_MIN_HFR:
+        if m is None or m[0] < STAR_MIN_HFR:
+            continue
+        if m[3]:
+            saturated = saturated or [(m[1], m[2], None)]
+            continue
+        if m[4] > STAR_PEAK_MAX * max_value:
+            bright.append((m[1], m[2], m[0]))
             continue
         found.append((m[1], m[2], m[0]))
         taken.append((m[1], m[2]))
         if len(found) >= limit:
             break
-    return found
+    found = (found + bright)[:limit]
+    return found or (saturated if not exclude else [])
 
 
-def _update_stars(state, img, region, max_value, bin2):
-    """監視中の星を再測定して中央値HFR(元画素px)を更新する。足りなければ検出し直す。"""
+def _update_stars(state, img, region, max_value, bin2, anchor=None):
+    """監視中の星を再測定して中央値HFR(元画素px)を更新する。足りなければ検出し直す。
+    region指定時はanchor(無ければ領域中心)に最も近い星を1個だけ追い、見失ったらその最後の位置の近傍だけ再探索する。"""
     k = 2 if bin2 else 1
     state["k"] = k
     kept, infos, hfrs = [], [], []
@@ -170,15 +216,33 @@ def _update_stars(state, img, region, max_value, bin2):
         if not m[3]:
             hfrs.append(m[0] * k)
     target = FOCUS_STARS if region is None else 1
+    # ピント調整中に集合が変わると中央値が跳ぶので、飽和した星も無理には入れ替えない(領域指定時は入れ替えない)
+    min_usable = 0 if region is not None else STAR_MIN_USABLE
     state["age"] += 1
-    if len(kept) < target and state["age"] >= STAR_REDETECT:
+    if (len(kept) < target or len(hfrs) < min_usable) and state["age"] >= STAR_REDETECT:
         state["age"] = 0
+        if len(hfrs) < min_usable:
+            kept = [s for s, i in zip(kept, infos) if i is not None]
+            infos = [i for i in infos if i is not None]
         h, w = img.shape[:2]
-        bounds = (0, 0, w // k, h // k) if region is None else tuple(int(v) // k for v in region)
-        for x, y, hfr in _detect_stars(img, bounds, k, max_value, kept, target - len(kept)):
+        if region is None:
+            found = _detect_stars(img, (0, 0, w // k, h // k), k, max_value, kept, target - len(kept))
+        else:
+            last = state["last"]
+            if last is not None:
+                r = 2 * STAR_RADIUS
+                bounds, pick = (int(last[0]) - r, int(last[1]) - r, int(last[0]) + r + 1, int(last[1]) + r + 1), last
+            else:
+                bounds = tuple(int(v) // k for v in region)
+                pick = (anchor[0] / k, anchor[1] / k) if anchor else ((region[0] + region[2]) / 2 / k, (region[1] + region[3]) / 2 / k)
+            found = _detect_near(img, bounds, k, max_value, pick)
+        for x, y, hfr in found:
             kept.append((x, y))
-            infos.append(hfr * k)
-            hfrs.append(hfr * k)
+            infos.append(None if hfr is None else hfr * k)
+            if hfr is not None:
+                hfrs.append(hfr * k)
+    if region is not None and kept:
+        state["last"] = kept[0]
     state["stars"], state["star_hfr"] = kept, infos
     state["sat"] = bool(kept) and not hfrs
     if not hfrs:
@@ -190,17 +254,18 @@ def _update_stars(state, img, region, max_value, bin2):
     state["hist"].append(score)
 
 
-def update_focus_state(state, img, region, max_value, stamp, bin2=True):
-    """測定領域が変わったら履歴をリセットし、stamp(フレーム番号等)が新しいときだけ指標を更新する。
-    星モードでは region=None で画面全体から複数の星を自動検出し、指定時はその中の最も明るい1個を測る。"""
-    if region != state["key"]:
+def update_focus_state(state, img, region, max_value, stamp, bin2=True, anchor=None):
+    """測定領域(とanchor)が変わったら履歴をリセットし、stamp(フレーム番号等)が新しいときだけ指標を更新する。
+    星モードでは region=None で画面全体から複数の星を自動検出し、指定時はanchor(画像座標。無ければ領域中心)に最も近い1個を測る。"""
+    key = (region, anchor)
+    if key != state["key"]:
         reset_focus_state(state)
-        state["key"] = region
+        state["key"] = key
     if stamp == state["fc"]:
         return
     state["fc"] = stamp
     if state["mode"] == "star":
-        _update_stars(state, img, region, max_value, bin2)
+        _update_stars(state, img, region, max_value, bin2, anchor)
         return
     res = focus_metric(img, region, max_value, bin2)
     if res is not None:
@@ -256,7 +321,7 @@ def draw_focus_panel(img, x, y, focus, width=230):
         title = f"HFR {score:.2f}px" if score > 0 else "HFR --"
         right, right_color = ("SAT", (0, 0, 255)) if sat else ((f"n={len(focus['stars'])}", (200, 200, 200)) if focus["stars"] else ("no star", (0, 0, 255)))
     else:
-        title = f"FOCUS {score:.2f}"
+        title = f"GRADIENT {score:.2f}"
         right, right_color = ("SAT", (0, 0, 255)) if sat else (f"pk {focus['peak']:.0f}", (200, 200, 200))
     cv2.putText(img, title, (x + 6, y + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1, cv2.LINE_AA)
     cv2.putText(img, f"best {focus['best']:.2f}", (x + 6, y + 36),
