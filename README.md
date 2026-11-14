@@ -3,6 +3,12 @@
 > **淡い天体を実況したい** ―― Raspberry Pi + PC によるRAWライブスタックアプリ群。
 > rpicam-raw の生ストリームをTCP経由でPCに受け、12bit RAWデベイヤ・加算スタック・ダーク減算・WB・FITS/SER保存までをリアルタイムで行う。Windows / Linux 対応。
 
+**デモ動画**（画像をクリックすると YouTube で開きます。ライブビュー・メニュー・スタック方式・SERプレーヤー・ROI・フォーカスアシスト。作り方は「デモ動画の作成」）
+
+[![Camera Live Applications デモ動画](https://img.youtube.com/vi/8vzTNwy1hBU/hqdefault.jpg)](https://youtu.be/8vzTNwy1hBU)
+
+[▶ YouTube で見る](https://youtu.be/8vzTNwy1hBU)
+
 ## 想定構成と前提
 
 - **想定用途**: Sky-Watcher HAC125DX（プライムフォーカス）で、星雲・星団・銀河などの**淡い天体**を撮る。惑星や流星のような明るい・動きの速い対象は主な想定ではない。
@@ -150,6 +156,12 @@ camera-live/
 
 ## デモ動画の作成（SNS紹介用）
 
+公開済みのデモ動画（全シーンを結合したもの。画像をクリックすると YouTube で開きます）:
+
+[![Camera Live Applications デモ動画](https://img.youtube.com/vi/8vzTNwy1hBU/hqdefault.jpg)](https://youtu.be/8vzTNwy1hBU)
+
+[▶ YouTube で見る](https://youtu.be/8vzTNwy1hBU)
+
 `demo/make_demo.py` が、`raw_live_stack.py` にキー操作を自動で送り、アプリ自身の画面録画（`[y]`）でAVI（MJPG）を作ります。info・ヒストグラム・設定メニュー・操作メニューがそのまま映り、押したキーと内容が下部のキャプションに出ます（キャプションは録画にだけ重ねる。アプリ本体は変更しない）。カメラ不要で、録画済みのSERファイルを再生して作ります。
 
 ```bash
@@ -168,6 +180,7 @@ python demo/make_demo.py --ser xxx.ser --wb 1.6,1.0,1.4             # ホワイ�
 | `control` | 操作メニュー: 保存、SER録画、リセット、JSON保存 |
 | `player` | SERプレーヤー: 一時停止・コマ送り・ジャンプ・ループモード |
 | `roi` | ROI: `--roi` で指定した領域で判定、`[i]` で枠のON/OFF、`[k]` でクリア |
+| `focus` | フォーカスアシスト: 星(円)の自動検出、Zoomで星をクリックしてロック、`[T]` 再選択、星(四角)、勾配。クリックする星の位置は `demo/make_demo.py` の `FOCUS_STAR`（反転後のプレビューの割合）で、SERを変えたら合わせる |
 
 - 出力は `demo/out/<シーン名>.avi`（`.gitignore` の `*.avi` / `*.mp4` で除外済み）。保存系の操作で作られる画像・SER・設定JSONは一時ディレクトリに出して、終了時に削除します。
 - 実行中はアプリのウィンドウが開きます（表示環境が必要）。シーンの長さは30〜80秒程度で、実時間で録画するため全シーンの生成に5分ほどかかります。

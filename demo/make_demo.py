@@ -45,6 +45,11 @@ class Timeline:
         self.events.append((self.t, None, caption))
         self.t += hold
 
+    def click(self, fx, fy, caption=None, hold=2.0):
+        """プレビュー上の割合(fx, fy)を左クリックする。"""
+        self.events.append((self.t, ("click", fx, fy), caption))
+        self.t += hold
+
     def repeat(self, key, n, caption=None, gap=0.08, hold=0.6):
         for i in range(n):
             self.events.append((self.t, key, caption if i == 0 else None))
@@ -199,6 +204,22 @@ def scene_roi(tl):
     tl.press("t", "[t] Stack OFF", 2.0)
 
 
+# フォーカスシーンでクリックする星の位置(左右反転後のプレビューでの割合)。SERを変えたら合わせる
+FOCUS_STAR = (0.431, 0.188)
+
+
+def scene_focus(tl):
+    tl.cap("Focus Aid: measure star size (HFR) while you adjust the focus", 3.0)
+    tl.press("F", "[F] Star (circle): 5 stars auto-detected, radius = HFR (half-flux radius)", 7.0)
+    tl.press("z", "[z] Zoom", 1.5)
+    tl.click(*FOCUS_STAR, "Click a star: it is locked and measured alone (n=1)", 9.0)
+    tl.press("T", "[T] Re-select the star (resets best / history)", 4.0)
+    tl.press("F", "[F] Star (box): measurement window instead of a circle", 5.0)
+    tl.press("F", "[F] Gradient: sharpness of the zoom area (for the Moon / planets)", 5.0)
+    tl.press("F", "[F] Focus Aid OFF", 2.0)
+    tl.press("z", "[z] Zoom OFF", 1.5)
+
+
 SCENES = {
     "live": ("01_live_view", scene_live, []),
     "menu": ("02_settings_menu", scene_menu, []),
@@ -206,6 +227,7 @@ SCENES = {
     "control": ("04_control_menu", scene_control, []),
     "player": ("05_ser_player", scene_player, ["--max-frames", "30"]),
     "roi": ("06_roi", scene_roi, ["--max-frames", "20", "--ser-loop-mode", "continuous"]),
+    "focus": ("07_focus_aid", scene_focus, ["--ser-loop-mode", "continuous"]),
 }
 
 
@@ -276,6 +298,22 @@ def run_child(scene_key, ser_path, wb, dark_path):
 
     state = {"t0": None, "i": 0}
     orig_wait = cv2.waitKeyEx
+    mouse = {}
+    orig_set_mouse = cv2.setMouseCallback
+
+    def capture_mouse(window, callback, param=None):
+        mouse[window] = (callback, param)
+        return orig_set_mouse(window, callback, param)
+
+    cv2.setMouseCallback = capture_mouse
+
+    def inject_click(fx, fy):
+        # プレビューウィンドウのマウスコールバックを直接呼ぶ
+        callback, param = mouse["RAW Live Stack"]
+        _x, _y, w, h = cv2.getWindowImageRect("RAW Live Stack")
+        x, y = round(fx * w), round(fy * h)
+        callback(cv2.EVENT_LBUTTONDOWN, x, y, 0, param)
+        callback(cv2.EVENT_LBUTTONUP, x, y, 0, param)
 
     def wait_with_script(delay):
         r = orig_wait(delay)
@@ -288,7 +326,9 @@ def run_child(scene_key, ser_path, wb, dark_path):
             state["i"] += 1
             if cap is not None:
                 caption[0] = cap
-            if key is not None:
+            if isinstance(key, tuple):
+                inject_click(key[1], key[2])
+            elif key is not None:
                 return SPECIAL[key] if key in SPECIAL else ord(key)
         return r
 
