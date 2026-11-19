@@ -130,6 +130,9 @@ class LiveStack:
         self.brightness_threshold = 255  # 打ち切り輝度しきい値（各チャンネル）
         self.stats_frame = None  # 停止判定と同じ加算値(255でクリップ)。Now/ヒストグラム用
         self.roi = None  # (x0,y0,x1,y1) フレームpx。停止判定・ヒストグラム・位置合わせの対象領域（None=全体/中央窓）
+        self.roi_track = False  # True: ROIを位置合わせのずれに追従させる（赤道儀停止などで星野が流れても対象に枠を固定する）
+        self._roi_origin = (0.0, 0.0)  # スタック開始時(pos=0)のROIのずれ。ROI位置 = roi + _roi_origin + pos
+        self._last_pos = (0.0, 0.0)  # 直近フレームの位置（clear_bufferで参照するためresetより先に定義）
         self.align_ratio = 0.5  # ROIなしのときの位置合わせ窓の大きさ（フレーム幅/高さに対する比率）
         self.align_min_response = 0.05  # phaseCorrelateの応答がこれ未満なら検出失敗
         self.align_max_jump = 10.0  # 予測位置からこれ以上外れた検出は異常値(px)
@@ -143,8 +146,11 @@ class LiveStack:
         self.buffer = [None] * self.max_frames
         self.buffer_pos = [None] * self.max_frames  # 各フレームの基準座標系での位置(x,y)・float
         self.buffer_index = 0
+        # 位置がpos=0に戻るので、追尾中のROIが元の位置へ戻らないようずれを引き継ぐ
+        self._roi_origin = (self._roi_origin[0] + self._last_pos[0], self._roi_origin[1] + self._last_pos[1])
         self._ref_img = None  # ずれ検出の基準(キーフレーム)画像
         self._ref_pos = (0.0, 0.0)
+        self._ref_org = (0, 0)  # 基準画像を切り出した窓の左上(px)。ROI追尾で窓が動くため補正に使う
         self._last_pos = (0.0, 0.0)
         self._last_vel = (0.0, 0.0)  # 検出失敗時の外挿用
         self._reject_count = 0
@@ -324,18 +330,51 @@ class LiveStack:
         x0, y0, x1, y1 = self.roi
         return f"x={x0} y={y0} {x1 - x0}x{y1 - y0}"
 
-    def roi_view(self, arr):
-        """ROIがあればその範囲(ビュー)、なければ(またはサイズが合わなければ)全体を返す。"""
-        roi = self.roi
-        if roi is None or roi[2] > arr.shape[1] or roi[3] > arr.shape[0]:
+    def roi_view(self, arr, pos=None):
+        """ROIがあればその範囲(ビュー)、なければ全体を返す。追尾ROIが画面外のときはNone。"""
+        if self.roi is None:
             return arr
-        return arr[roi[1]:roi[3], roi[0]:roi[2]]
+        vis = self.roi_visible(arr.shape[1], arr.shape[0], pos)
+        if vis is None:
+            return None
+        return arr[vis[1]:vis[3], vis[0]:vis[2]]
 
-    def align_window(self, w, h):
-        """位置合わせ窓(x0,y0,x1,y1)。ROIがあるときROIの中心を保ち、辺が小さければ ROI_ALIGN_MIN_SIZE まで広げる。
-        ROIなしは中央の align_ratio 窓。"""
+    def set_roi(self, roi):
+        """ROIを設定する（現在のフレーム上での位置を追尾の基準にする）。"""
+        self.roi = roi
+        self._roi_origin = (-self._last_pos[0], -self._last_pos[1])
+
+    def set_roi_track(self, on):
+        """ROI追尾の切替。現在のフレーム上でROIが設定位置にあるものとして追尾を始める。"""
+        self.roi_track = bool(on)
+        self._roi_origin = (-self._last_pos[0], -self._last_pos[1])
+
+    def tracked_roi(self, pos=None):
+        """posのフレーム座標でのROI。追尾ONならずれ分だけ動く（フレーム外にはみ出し得る）。ROIなしはNone。"""
         roi = self.roi
-        if roi is None or roi[2] > w or roi[3] > h:
+        if roi is None or not self.roi_track:
+            return roi
+        if pos is None:
+            pos = self._last_pos
+        ox = int(round(self._roi_origin[0] + pos[0]))
+        oy = int(round(self._roi_origin[1] + pos[1]))
+        return (roi[0] + ox, roi[1] + oy, roi[2] + ox, roi[3] + oy)
+
+    def roi_visible(self, w, h, pos=None):
+        """tracked_roi をフレーム内に切り取った範囲。見えている部分が ROI_MIN_SIZE 未満(画面外)ならNone。ROIなしもNone。"""
+        roi = self.tracked_roi(pos)
+        if roi is None:
+            return None
+        x0, y0, x1, y1 = max(0, roi[0]), max(0, roi[1]), min(w, roi[2]), min(h, roi[3])
+        if x1 - x0 < ROI_MIN_SIZE or y1 - y0 < ROI_MIN_SIZE:
+            return None
+        return (x0, y0, x1, y1)
+
+    def align_window(self, w, h, pos=None):
+        """位置合わせ窓(x0,y0,x1,y1)。ROIがあるときROIの中心を保ち、辺が小さければ ROI_ALIGN_MIN_SIZE まで広げる。
+        ROIなし/画面外は中央の align_ratio 窓。"""
+        roi = self.roi_visible(w, h, pos)
+        if roi is None:
             sw = min(w, max(64, int(w * self.align_ratio)))
             sh = min(h, max(64, int(h * self.align_ratio)))
             x0, y0 = (w - sw) // 2, (h - sh) // 2
@@ -347,10 +386,10 @@ class LiveStack:
             out += [start, start + length]
         return (out[0], out[2], out[1], out[3])
 
-    def _prepare_align_image(self, frame):
-        """位置合わせ窓をダーク減算→グレー化→背景除去して、ずれ検出用画像を作る。"""
+    def _prepare_align_image(self, frame, pos=None):
+        """位置合わせ窓をダーク減算→グレー化→背景除去して、ずれ検出用画像と窓の左上(px)を返す。"""
         h, w = frame.shape[:2]
-        x0, y0, x1, y1 = self.align_window(w, h)
+        x0, y0, x1, y1 = self.align_window(w, h, pos)
         crop = frame[y0:y1, x0:x1]
         dark = self.dark_frame
         if dark is not None and dark.shape == frame.shape:
@@ -359,7 +398,7 @@ class LiveStack:
         # 2x2に縮小して計算量を減らす（検出したずれは2倍してpxに戻す）
         gray = cv2.resize(gray, (gray.shape[1] // 2, gray.shape[0] // 2), interpolation=cv2.INTER_AREA).astype(np.float32)
         gray = cv2.GaussianBlur(gray, (0, 0), 1.0)
-        return gray - cv2.GaussianBlur(gray, (0, 0), 16)
+        return gray - cv2.GaussianBlur(gray, (0, 0), 16), (x0, y0)
 
     def _detect_shift(self, prev, cur):
         """prev→curの移動量(dx,dy)をフレームpxのfloat(サブピクセル)で返す。失敗時はNone。"""
@@ -378,12 +417,14 @@ class LiveStack:
         prev = self.buffer[(self.buffer_index - 1) % self.max_frames]
         if prev is not None and prev.shape != frame.shape:
             self.clear_buffer()  # サイズが変わったら過去フレームは使えない
-        cur = self._prepare_align_image(frame)
+        pred = (self._last_pos[0] + self._last_vel[0], self._last_pos[1] + self._last_vel[1])
+        cur, org = self._prepare_align_image(frame, pred)
         pos = self._last_pos
         if self._ref_img is not None and self._ref_img.shape == cur.shape:
             d = self._detect_shift(self._ref_img, cur)
-            pred = (self._last_pos[0] + self._last_vel[0], self._last_pos[1] + self._last_vel[1])
             if d is not None:
+                # 窓がROI追尾で動いた分を足して、フレーム全体のずれにする
+                d = (d[0] + org[0] - self._ref_org[0], d[1] + org[1] - self._ref_org[1])
                 cand = (self._ref_pos[0] + d[0], self._ref_pos[1] + d[1])
                 # 予測から大きく外れた検出は誤検出として捨てる（連続したら再ロックとして受け入れる）
                 if max(abs(cand[0] - pred[0]), abs(cand[1] - pred[1])) > self.align_max_jump and self._reject_count < 5:
@@ -401,10 +442,12 @@ class LiveStack:
                 if max(abs(d[0]), abs(d[1])) > 0.1 * min(cur.shape) * 2:
                     self._ref_img = cur
                     self._ref_pos = pos
+                    self._ref_org = org
         else:
-            pos = (self._last_pos[0] + self._last_vel[0], self._last_pos[1] + self._last_vel[1])
+            pos = pred
             self._ref_img = cur
             self._ref_pos = pos
+            self._ref_org = org
         self._last_pos = pos
 
         self.buffer[self.buffer_index] = frame
@@ -414,6 +457,8 @@ class LiveStack:
     def _overflow_ratio(self, stack):
         """ROI(なければ全体)で max(B,G,R) がしきい値以上の画素の比率。広いときは約10万画素に間引いて計算量を抑える。"""
         view = self.roi_view(stack)
+        if view is None:
+            return 0.0  # 追尾ROIが画面外の間は停止判定しない
         step = max(1, int((view.shape[0] * view.shape[1] / 100000) ** 0.5))
         if step > 1:
             view = view[::step, ::step]
@@ -574,6 +619,7 @@ def build_control_menu(has_camera, roi_key):
         ("Focus Aid", "F", "focus"),
         ("Focus Reselect", "T", None),
         ("ROI (select/clear)", roi_key, "roi"),
+        ("ROI Track", "K", "roi_track"),
         ("Stack Reset", "r", None),
     ]
     if has_camera:
@@ -590,6 +636,8 @@ class LiveUi:
         self.roi_key = "o" if has_camera else "k"  # picamera2直結では k がカメラ切り替えのため o
         self.roi_ui = {"select": False, "start": None, "current": None, "dragging": False}  # 座標はプレビューpx
         self._pending_roi = getattr(args, "roi", None)  # --roi は最初のフレームでサイズを見て検証する
+        live_stack.set_roi_track(getattr(args, "roi_track", False))
+        self._roi_out_logged = False  # ROI OUTの状態遷移をログに1回だけ出すため
         self.settings_menu = SettingsMenu(names=CAMERA_MENU_NAMES if has_camera else STREAM_MENU_NAMES)
         self.control_menu = build_control_menu(has_camera, self.roi_key)
         self.screen_rec = ScreenRecorder(args.screen_fps)
@@ -646,15 +694,20 @@ class LiveUi:
 
     def set_roi(self, roi):
         ls = self.live_stack
-        ls.roi = roi
         if self.stacking_enabled:
             ls.reset()
+        ls.set_roi(roi)  # リセット後に設定し、追尾のずれ基準をこの位置に合わせる
         if roi is None:
             print("[roi] クリア（全体で判定・中央窓で位置合わせ）")
         else:
             print(f"[roi] 設定: {ls.roi_text()}")
             if min(roi[2] - roi[0], roi[3] - roi[1]) < ROI_ALIGN_MIN_SIZE:
                 print(f"[roi] 辺が{ROI_ALIGN_MIN_SIZE}px未満のため、位置合わせ窓はROIの中心で{ROI_ALIGN_MIN_SIZE}pxまで広げます（停止判定・ヒストグラムはROIそのもの）")
+
+    def toggle_roi_track(self):
+        ls = self.live_stack
+        ls.set_roi_track(not ls.roi_track)
+        print(f"[roi] 追尾: {'ON' if ls.roi_track else 'OFF'}" + ("" if ls.roi is not None else f"（ROI未設定のため[{self.roi_key}]で指定してください）"))
 
     def toggle_roi(self):
         """ROIをクリア、選択中なら取消、どちらでもなければドラッグ選択モードにする。"""
@@ -795,6 +848,13 @@ class LiveUi:
         if ls.roi is not None and self._last_frame is not None and (self.info_display or ru["select"]):
             h, w = self._last_frame.shape[:2]
             ph, pw = preview_frame.shape[:2]
+            vis = ls.roi_visible(w, h)
+            roi_out = ls.roi_track and vis is None
+            if roi_out != self._roi_out_logged:
+                self._roi_out_logged = roi_out
+                print("[roi] ROIがフレーム外です。停止判定を一時停止し中央窓で位置合わせを続けます（赤道儀を確認してください）" if roi_out else "[roi] ROIがフレーム内に戻りました。追尾を再開します")
+            if roi_out:
+                cv2.putText(preview_frame, "ROI OUT", (10, preview_frame.shape[0] - 64), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2, cv2.LINE_AA)
 
             def to_preview(x0, y0, x1, y1):
                 if self.flip_h:
@@ -803,13 +863,14 @@ class LiveUi:
                     y0, y1 = h - y1, h - y0
                 return (round(x0 * pw / w), round(y0 * ph / h)), (round(x1 * pw / w), round(y1 * ph / h))
 
-            p0, p1 = to_preview(*ls.roi)
-            cv2.rectangle(preview_frame, p0, p1, color, 1)
-            cv2.putText(preview_frame, "ROI", (p0[0] + 4, max(14, p0[1] - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
-            win = ls.align_window(w, h)
-            if win != ls.roi:
-                q0, q1 = to_preview(*win)
-                cv2.rectangle(preview_frame, q0, q1, (160, 90, 160), 1)  # 位置合わせ窓（ROIより広いとき）
+            if vis is not None:
+                p0, p1 = to_preview(*vis)
+                cv2.rectangle(preview_frame, p0, p1, color, 1)
+                cv2.putText(preview_frame, "ROI(track)" if ls.roi_track else "ROI", (p0[0] + 4, max(14, p0[1] - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+                win = ls.align_window(w, h)
+                if win != vis:
+                    q0, q1 = to_preview(*win)
+                    cv2.rectangle(preview_frame, q0, q1, (160, 90, 160), 1)  # 位置合わせ窓（ROIより広いとき）
         if ru["select"]:
             cv2.putText(preview_frame, f"ROI: drag to select  ([{self.roi_key}] cancel)", (10, preview_frame.shape[0] - 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 1, cv2.LINE_AA)
@@ -858,7 +919,7 @@ class LiveUi:
             if roi is None:
                 print(f"[roi] --roi {x} {y} {rw} {rh} は無効(範囲外または小さすぎる)のため無視します")
             else:
-                self.live_stack.roi = roi
+                self.live_stack.set_roi(roi)
                 print(f"[roi] 読み込み: {self.live_stack.roi_text()}")
         if self.stacking_enabled:
             self.live_stack.add_to_buffer(frame)
@@ -881,7 +942,9 @@ class LiveUi:
 
         # Now とヒストグラムは停止判定と同じ対象で出す（スタック中は加算値、表示画像は√N補正済みで判定とずれる）。ROIがあればROI内
         stats_src = ls.stats_frame if (self.stacking_enabled and ls.stats_frame is not None) else self._last_frame
-        stats_src = ls.roi_view(stats_src)
+        stats_src = ls.roi_view(stats_src, ls._last_pos)
+        if stats_src is None:  # 追尾ROIが画面外のときは全体を使う
+            stats_src = ls.stats_frame if (self.stacking_enabled and ls.stats_frame is not None) else self._last_frame
 
         if self.info_display:
             mode_text = "Live Stack Mode" if self.stacking_enabled else "Live View Mode"
@@ -893,7 +956,10 @@ class LiveUi:
                 cv2.putText(preview_frame, f"Now: {current_ratio * 100:.2f}% / Limit: {ls.overflow_ratio_threshold * 100:.2f}%", (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
             lines = list(extra_lines)
             if ls.roi is not None:
-                lines.append(f"ROI: {ls.roi_text()}")
+                roi_state = ""
+                if ls.roi_track and self._last_frame is not None:
+                    roi_state = "  TRACK" if ls.roi_visible(self._last_frame.shape[1], self._last_frame.shape[0]) is not None else "  TRACK:OUT(停止判定一時停止)"
+                lines.append(f"ROI: {ls.roi_text()}{roi_state}")
             for i, line in enumerate(lines):
                 cv2.putText(preview_frame, line, (10, 150 + i * 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             if self.show_hist:
@@ -913,7 +979,7 @@ class LiveUi:
         if self.settings_menu.menu_active:
             preview_frame = self.settings_menu.draw_menu(preview_frame)
         if self.control_menu.menu_active:
-            preview_frame = self.control_menu.draw_menu(preview_frame, {"scr": self.screen_rec.active, "zoom": self.zoom_on, "focus": focus_mode_label(self.focus), "roi": ls.roi is not None or self.roi_ui["select"]})
+            preview_frame = self.control_menu.draw_menu(preview_frame, {"scr": self.screen_rec.active, "zoom": self.zoom_on, "focus": focus_mode_label(self.focus), "roi": ls.roi is not None or self.roi_ui["select"], "roi_track": ls.roi_track})
 
         self.screen_rec.write(preview_frame)
         self.screen_rec.draw_indicator(preview_frame)  # 録画フレームに写らないよう書き込み後に描画
@@ -1033,6 +1099,8 @@ class LiveUi:
                 print("[focus] 星を選び直し（ベスト・履歴をリセット）")
         elif key == ord(self.roi_key):
             self.toggle_roi()
+        elif key == ord("K"):
+            self.toggle_roi_track()
         elif key in (ord("s"), ord("p")):
             self.save_image("png", save_frame)
         elif key == ord("j"):
@@ -1059,7 +1127,7 @@ class LiveUi:
 def run_stream_mode(source, args, ssh_info=None):
     """URL/カメラ番号ソースでLiveStackを実行（picamera2不要）。ssh_info=(client, pid, ssh_host)があれば終了時にSSH停止する。"""
     print(f"Live Stack - Source: {source}")
-    print("操作: [q]終了 [m]設定メニュー [c]操作メニュー [s]PNG [j]JPEG [f]FITS [y]画面録画 [z]ズーム [F]フォーカスアシスト [t]スタックON/OFF [r]リセット [i]情報表示 [h]左右反転 [v]上下反転")
+    print("操作: [q]終了 [m]設定メニュー [c]操作メニュー [s]PNG [j]JPEG [f]FITS [y]画面録画 [z]ズーム [F]フォーカスアシスト [t]スタックON/OFF [r]リセット [i]情報表示 [h]左右反転 [v]上下反転 [k]ROI [K]ROI追尾")
 
     cap = open_capture(source)
     if not cap.isOpened():
@@ -1146,6 +1214,8 @@ def main():
     parser.add_argument("--roi", type=int, nargs=4, metavar=("X", "Y", "W", "H"), default=None,
                         help="停止判定・ヒストグラム・位置合わせの対象領域 (受信フレームのpx)。未指定=全体で判定・中央窓で位置合わせ。"
                              "[k]キー(picamera2直結は[o])でもドラッグ指定できる。設定JSONのroi(raw_live_stack用のraw px)は読み込まない")
+    parser.add_argument("--roi-track", action="store_true",
+                        help="ROIを位置合わせで求めたずれに追従させる（赤道儀が止まっても対象に枠を固定）。ROIが画面外に出ると ROI OUT を表示して停止判定を止め、中央窓で位置合わせを続ける。[K]キー/操作メニューでも切替可")
 
     pre, _ = parser.parse_known_args()
     if pre.config:
@@ -1194,7 +1264,7 @@ def main():
     print("  [q] 終了")
     print("  [m] 設定メニュー  [c] 操作メニュー（保存・画面録画・リセット・ダーク・カメラ切替）")
     print("  [i] 情報表示ON/OFF")
-    print("  [k] カメラ切り替え")
+    print("  [k] カメラ切り替え  [o] ROI指定/クリア  [K] ROI追尾ON/OFF")
     print("  [s] PNG保存  [j] JPEG保存  [f] FITS保存")
     print("  [y] 画面録画AVI開始/停止")
     print("  [t] LiveStack ON/OFF")
